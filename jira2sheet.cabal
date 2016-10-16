@@ -37,6 +37,9 @@ executable jira2sheet
   build-depends:       base
                      , jira2sheet
                      , optparse-applicative
+                     , logging-effect
+                     , transformers
+                     , text
   default-language:    Haskell2010
 
 test-suite jira2sheet-test

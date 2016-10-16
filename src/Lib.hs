@@ -5,21 +5,19 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 module Lib
-    ( runJira
+    (
+        jiraApp
+      , DomainName(..)
     ) where
 
 import           Prelude                   hiding (writeFile)
 
 import           Control.Lens              ((&), (?~), (^.))
-import           Control.Monad.IO.Class    (liftIO)
-import           Control.Monad.IO.Class    (MonadIO)
-import           Control.Monad.Log         (MonadLog (..),
-                                            Severity (Informational),
-                                            WithSeverity, discardSeverity,
-                                            logDebug, logInfo, msgSeverity,
-                                            runLoggingT)
-import           Control.Monad.Trans.Class (lift)
-import           Control.Monad.Trans.Maybe (MaybeT (..), runMaybeT)
+import           Control.Monad.IO.Class    (MonadIO, liftIO)
+import           Control.Monad.Log         (MonadLog (..), WithSeverity,
+                                            logDebug, logInfo)
+import           Control.Monad.Trans.Class (MonadTrans, lift)
+import           Control.Monad.Trans.Maybe (MaybeT (..))
 import           Data.Aeson                (FromJSON)
 import qualified Data.ByteString           as BS
 import           Data.ByteString.Lazy      (writeFile)
@@ -30,7 +28,6 @@ import           Data.Monoid               ((<>))
 import           Data.Text                 (Text)
 import qualified Data.Text                 as Text
 import qualified Data.Text.Encoding        as Text
-import qualified Data.Text.IO              as Text
 import           GHC.Generics              (Generic)
 import           Network.URI               (URI (..), URIAuth (..))
 import           Network.Wreq              (Auth, asJSON, auth, defaults,
@@ -160,7 +157,7 @@ jiraURI (DomainName domain) (SearchQuery (JQL jql) start) =
                                     , uriRegName=domain
                                     , uriPort=""}
         , uriPath="/rest/api/latest/search"
-        , uriQuery="?jql=" <> jql <> "&startAt=" <> show start <> "&maxResults=4"
+        , uriQuery="?jql=" <> jql <> "&startAt=" <> show start
         , uriFragment=""}
 
 query :: Auth -> DomainName -> SearchQuery -> IO JiraResponse
@@ -185,17 +182,9 @@ queryRest query acc is count = do
     is' <- liftIO $ issues <$> query count
     queryRest query (acc ++ is) is' (count + length is')
 
-minLogLevel :: Severity
-minLogLevel = Informational
-
-logHandler :: (MonadIO m) => WithSeverity Text -> m ()
-logHandler msg = case compare (msgSeverity msg) minLogLevel of
-    GT -> return ()
-    _  -> liftIO $ Text.putStrLn $ discardSeverity msg
-
-runJira :: String -> IO (Maybe ())
-runJira domainName = runMaybeT $ flip runLoggingT logHandler $ do
-    let domain = DomainName domainName
+jiraApp :: (MonadIO (m (MaybeT IO)), MonadTrans m, Log (m (MaybeT IO))) =>
+     DomainName -> m (MaybeT IO) ()
+jiraApp domain = do
     credentials <- lift getCredentials
     let queryChunk start = query credentials domain (SearchQuery (JQL jqlQuery) start)
     is <- queryAll queryChunk
