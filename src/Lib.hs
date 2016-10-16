@@ -1,5 +1,7 @@
+{-# LANGUAGE ConstraintKinds   #-}
 {-# LANGUAGE DeriveAnyClass    #-}
 {-# LANGUAGE DeriveGeneric     #-}
+{-# LANGUAGE FlexibleContexts  #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Lib
@@ -10,6 +12,13 @@ import           Prelude                   hiding (writeFile)
 
 import           Control.Lens              ((&), (?~), (^.))
 import           Control.Monad.IO.Class    (liftIO)
+import           Control.Monad.IO.Class    (MonadIO)
+import           Control.Monad.Log         (MonadLog (..),
+                                            Severity (Informational),
+                                            WithSeverity, discardSeverity,
+                                            logDebug, logInfo, msgSeverity,
+                                            runLoggingT)
+import           Control.Monad.Trans.Class (lift)
 import           Control.Monad.Trans.Maybe (MaybeT (..), runMaybeT)
 import           Data.Aeson                (FromJSON)
 import qualified Data.ByteString           as BS
@@ -21,6 +30,7 @@ import           Data.Monoid               ((<>))
 import           Data.Text                 (Text)
 import qualified Data.Text                 as Text
 import qualified Data.Text.Encoding        as Text
+import qualified Data.Text.IO              as Text
 import           GHC.Generics              (Generic)
 import           Network.URI               (URI (..), URIAuth (..))
 import           Network.Wreq              (Auth, asJSON, auth, defaults,
@@ -28,6 +38,8 @@ import           Network.Wreq              (Auth, asJSON, auth, defaults,
 import qualified Network.Wreq              as Wreq
 import           System.Console.Haskeline  (defaultSettings, getInputLine,
                                             getPassword, runInputT)
+
+type Log = MonadLog (WithSeverity Text)
 
 data JiraStatus = JiraStatus {
     name :: Text
@@ -148,7 +160,7 @@ jiraURI (DomainName domain) (SearchQuery (JQL jql) start) =
                                     , uriRegName=domain
                                     , uriPort=""}
         , uriPath="/rest/api/latest/search"
-        , uriQuery="?jql=" <> jql <> "&startAt=" <> show start
+        , uriQuery="?jql=" <> jql <> "&startAt=" <> show start <> "&maxResults=4"
         , uriFragment=""}
 
 query :: Auth -> DomainName -> SearchQuery -> IO JiraResponse
@@ -157,27 +169,35 @@ query credentials domain query = do
     response <- asJSON =<< getWith opts (show $ jiraURI domain query)
     return $ response ^. responseBody
 
-queryAll :: (Int -> IO JiraResponse) -> IO [JiraIssue]
+queryAll :: (Log m, MonadIO m) => (Int -> IO JiraResponse) -> m [JiraIssue]
 queryAll query = do
-    response <- query 0
+    response <- liftIO $ query 0
     let is = issues response
     let maxNumber = maxResults response
     case compare (total response) maxNumber of
         GT -> queryRest query [] is (length is)
         _  -> return is
 
-queryRest :: (Int -> IO JiraResponse) -> [JiraIssue] -> [JiraIssue] -> Int -> IO [JiraIssue]
+queryRest :: (Log m, MonadIO m) => (Int -> IO JiraResponse) -> [JiraIssue] -> [JiraIssue] -> Int -> m [JiraIssue]
 queryRest _ acc [] _ = return acc
 queryRest query acc is count = do
-    is' <- issues <$> query count
+    logDebug "Results exceeded maxResults, requesting next page..."
+    is' <- liftIO $ issues <$> query count
     queryRest query (acc ++ is) is' (count + length is')
 
+minLogLevel :: Severity
+minLogLevel = Informational
+
+logHandler :: (MonadIO m) => WithSeverity Text -> m ()
+logHandler msg = case compare (msgSeverity msg) minLogLevel of
+    GT -> return ()
+    _  -> liftIO $ Text.putStrLn $ discardSeverity msg
 
 runJira :: String -> IO (Maybe ())
-runJira domainName = runMaybeT $ do
+runJira domainName = runMaybeT $ flip runLoggingT logHandler $ do
     let domain = DomainName domainName
-    credentials <- getCredentials
+    credentials <- lift getCredentials
     let queryChunk start = query credentials domain (SearchQuery (JQL jqlQuery) start)
-    is <- liftIO $ queryAll queryChunk
+    is <- queryAll queryChunk
     liftIO $ writeFile "jira.csv" $ encodeDefaultOrderedByName $ map (jiraToRecord domain) is
-    liftIO $ putStrLn "jira.csv created"
+    logInfo "jira.csv created"
