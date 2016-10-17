@@ -28,6 +28,7 @@ library
                      , network-uri
                      , transformers
                      , logging-effect
+                     , exceptions
   default-language:    Haskell2010
 
 executable jira2sheet

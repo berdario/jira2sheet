@@ -6,8 +6,7 @@ import           Control.Monad             (void)
 import           Control.Monad.IO.Class    (MonadIO, liftIO)
 import           Control.Monad.Log         (LoggingT, Severity (Informational),
                                             WithSeverity, discardSeverity,
-                                            logDebug, logInfo, msgSeverity,
-                                            runLoggingT)
+                                            msgSeverity, runLoggingT)
 import           Control.Monad.Trans.Maybe (MaybeT (..), runMaybeT)
 import           Data.Text                 (Text)
 import qualified Data.Text.IO              as Text
@@ -30,7 +29,7 @@ logHandler msg = case compare (msgSeverity msg) maxLogLevel of
 parser :: Parser String
 parser = argument str (metavar "<Jira domain name>")
 
-runner :: (MonadIO m) => LoggingT (WithSeverity Text) (MaybeT m) a -> m (Maybe a)
+runner :: LoggingT (WithSeverity Text) (MaybeT IO) a -> IO (Maybe a)
 runner = runMaybeT . flip runLoggingT logHandler
 
 main :: IO ()

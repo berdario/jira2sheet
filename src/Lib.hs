@@ -10,33 +10,67 @@ module Lib
       , DomainName(..)
     ) where
 
-import           Prelude                   hiding (writeFile)
+import           Prelude                    hiding (writeFile)
 
-import           Control.Lens              ((&), (?~), (^.))
-import           Control.Monad.IO.Class    (MonadIO, liftIO)
-import           Control.Monad.Log         (MonadLog (..), WithSeverity,
-                                            logDebug, logInfo)
-import           Control.Monad.Trans.Class (MonadTrans, lift)
-import           Control.Monad.Trans.Maybe (MaybeT (..))
-import           Data.Aeson                (FromJSON)
-import qualified Data.ByteString           as BS
-import           Data.ByteString.Lazy      (writeFile)
-import           Data.Csv                  (DefaultOrdered, ToField (toField),
-                                            ToNamedRecord,
-                                            encodeDefaultOrderedByName)
-import           Data.Monoid               ((<>))
-import           Data.Text                 (Text)
-import qualified Data.Text                 as Text
-import qualified Data.Text.Encoding        as Text
-import           GHC.Generics              (Generic)
-import           Network.URI               (URI (..), URIAuth (..))
-import           Network.Wreq              (Auth, asJSON, auth, defaults,
-                                            getWith, responseBody)
-import qualified Network.Wreq              as Wreq
-import           System.Console.Haskeline  (defaultSettings, getInputLine,
-                                            getPassword, runInputT)
+import           Control.Lens               ((&), (?~), (^.))
+import           Control.Monad              (MonadPlus, mzero, (<=<))
+import           Control.Monad.Catch        (MonadThrow)
+import           Control.Monad.Log          (LoggingT (..), MonadLog (..),
+                                             WithSeverity, logDebug, logInfo,
+                                             runLoggingT)
+import           Control.Monad.Trans.Class  (lift)
+import           Control.Monad.Trans.Maybe  (MaybeT (..))
+import           Control.Monad.Trans.Reader (ReaderT (..))
+import           Data.Aeson                 (FromJSON)
+import           Data.ByteString            (ByteString)
+import qualified Data.ByteString.Lazy       as BS
+import           Data.Csv                   (DefaultOrdered, ToField (toField),
+                                             ToNamedRecord,
+                                             encodeDefaultOrderedByName)
+import           Data.Monoid                ((<>))
+import           Data.Text                  (Text)
+import qualified Data.Text                  as Text
+import qualified Data.Text.Encoding         as Text
+import           GHC.Generics               (Generic)
+import           Network.URI                (URI (..), URIAuth (..))
+import           Network.Wreq               (Auth, asJSON, auth, defaults,
+                                             responseBody)
+import qualified Network.Wreq               as Wreq
+import           System.Console.Haskeline   (InputT, MonadException (..),
+                                             RunIO (..), defaultSettings,
+                                             getInputLine, getPassword,
+                                             runInputT)
 
 type Log = MonadLog (WithSeverity Text)
+
+class (Monad m, MonadThrow m) => MonadHTTPGet m where
+    getWith :: Wreq.Options -> String -> m (Wreq.Response BS.ByteString)
+
+class (Monad m) => WriteFS m where
+    writeFile :: FilePath -> BS.ByteString -> m ()
+
+instance MonadHTTPGet IO where
+    getWith = Wreq.getWith
+
+instance WriteFS IO where
+    writeFile = BS.writeFile
+
+instance (MonadHTTPGet m) => MonadHTTPGet (LoggingT message m) where
+    getWith options = lift . getWith options
+
+instance (WriteFS m) => WriteFS (LoggingT message m) where
+    writeFile path = lift . writeFile path
+
+instance (MonadHTTPGet m) => MonadHTTPGet (MaybeT m) where
+    getWith options = lift . getWith options
+
+instance (WriteFS m) => WriteFS (MaybeT m) where
+    writeFile path = lift . writeFile path
+
+instance (MonadException m) => MonadException (LoggingT message m) where
+     controlIO f = LoggingT $ ReaderT $ \s -> controlIO $ \(RunIO run) -> let
+                    run' = RunIO (fmap (LoggingT . lift) . run . flip runLoggingT s)
+                    in flip runLoggingT s <$> f run'
 
 data JiraStatus = JiraStatus {
     name :: Text
@@ -84,7 +118,7 @@ instance ToField Bool where
     toField True  = "Yes"
     toField False = "No"
 
-showBS :: (Show a) => a -> BS.ByteString
+showBS :: (Show a) => a -> ByteString
 showBS = Text.encodeUtf8 . Text.pack . show
 
 instance ToField URI where
@@ -125,9 +159,10 @@ basicAuth :: String -> String -> Auth
 basicAuth user password = Wreq.basicAuth (encode user) (encode password)
     where encode = Text.encodeUtf8 . Text.pack
 
-runInput = MaybeT . runInputT defaultSettings
+runInput :: (MonadException m, MonadPlus m) => InputT m (Maybe a) -> m a
+runInput = maybe mzero return <=< runInputT defaultSettings
 
-getCredentials :: MaybeT IO Auth
+getCredentials :: (MonadException m, MonadPlus m) => m Auth
 getCredentials = do
     user <- runInput $ getInputLine "Jira username>"
     password <- runInput $ getPassword Nothing "Jira password>"
@@ -160,33 +195,34 @@ jiraURI (DomainName domain) (SearchQuery (JQL jql) start) =
         , uriQuery="?jql=" <> jql <> "&startAt=" <> show start
         , uriFragment=""}
 
-query :: Auth -> DomainName -> SearchQuery -> IO JiraResponse
+query :: (MonadHTTPGet m) => Auth -> DomainName -> SearchQuery -> m JiraResponse
 query credentials domain query = do
     let opts = defaults & auth ?~ credentials
     response <- asJSON =<< getWith opts (show $ jiraURI domain query)
     return $ response ^. responseBody
 
-queryAll :: (Log m, MonadIO m) => (Int -> IO JiraResponse) -> m [JiraIssue]
+queryAll :: (Log m, MonadHTTPGet m) => (Int -> m JiraResponse) -> m [JiraIssue]
 queryAll query = do
-    response <- liftIO $ query 0
+    response <- query 0
     let is = issues response
     let maxNumber = maxResults response
     case compare (total response) maxNumber of
         GT -> queryRest query [] is (length is)
         _  -> return is
 
-queryRest :: (Log m, MonadIO m) => (Int -> IO JiraResponse) -> [JiraIssue] -> [JiraIssue] -> Int -> m [JiraIssue]
+queryRest :: (Log m, MonadHTTPGet m) => (Int -> m JiraResponse) -> [JiraIssue] -> [JiraIssue] -> Int -> m [JiraIssue]
 queryRest _ acc [] _ = return acc
 queryRest query acc is count = do
     logDebug "Results exceeded maxResults, requesting next page..."
-    is' <- liftIO $ issues <$> query count
+    is' <- issues <$> query count
     queryRest query (acc ++ is) is' (count + length is')
 
-jiraApp :: (MonadIO (m (MaybeT IO)), MonadTrans m, Log (m (MaybeT IO))) =>
-     DomainName -> m (MaybeT IO) ()
+
+jiraApp :: (MonadPlus m, Log m, MonadException m, MonadHTTPGet m, WriteFS m) =>
+            DomainName -> m ()
 jiraApp domain = do
-    credentials <- lift getCredentials
+    credentials <- getCredentials
     let queryChunk start = query credentials domain (SearchQuery (JQL jqlQuery) start)
     is <- queryAll queryChunk
-    liftIO $ writeFile "jira.csv" $ encodeDefaultOrderedByName $ map (jiraToRecord domain) is
+    writeFile "jira.csv" $ encodeDefaultOrderedByName $ map (jiraToRecord domain) is
     logInfo "jira.csv created"
