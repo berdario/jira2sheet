@@ -1,13 +1,24 @@
-{-# LANGUAGE ConstraintKinds   #-}
 {-# LANGUAGE DeriveAnyClass    #-}
 {-# LANGUAGE DeriveGeneric     #-}
 {-# LANGUAGE FlexibleContexts  #-}
+{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Lib
     (
         jiraApp
       , DomainName(..)
+      , MonadHTTPGet
+      , WriteFS
+      , Log
+      , query
+      , queryAll
+      , JQL(..)
+      , SearchQuery(..)
+      , JiraStatus(..)
+      , JiraFields(..)
+      , JiraIssue(..)
+      , JiraResponse(..)
     ) where
 
 import           Prelude                    hiding (writeFile)
@@ -15,9 +26,9 @@ import           Prelude                    hiding (writeFile)
 import           Control.Lens               ((&), (?~), (^.))
 import           Control.Monad              (MonadPlus, mzero, (<=<))
 import           Control.Monad.Catch        (MonadThrow)
-import           Control.Monad.Log          (LoggingT (..), MonadLog (..),
-                                             WithSeverity, logDebug, logInfo,
+import           Control.Monad.Log          (LoggingT (..), WithSeverity,
                                              runLoggingT)
+import qualified Control.Monad.Log          as Log
 import           Control.Monad.Trans.Class  (lift)
 import           Control.Monad.Trans.Maybe  (MaybeT (..))
 import           Control.Monad.Trans.Reader (ReaderT (..))
@@ -41,16 +52,22 @@ import           System.Console.Haskeline   (InputT, MonadException (..),
                                              getInputLine, getPassword,
                                              runInputT)
 
-type Log = MonadLog (WithSeverity Text)
+class Log m where
+     logDebug :: Text -> m ()
+     logInfo :: Text -> m()
 
 class (Monad m, MonadThrow m) => MonadHTTPGet m where
-    getWith :: Wreq.Options -> String -> m (Wreq.Response BS.ByteString)
+    getWith :: (FromJSON a) => Wreq.Options -> String -> m (Wreq.Response a)
 
 class (Monad m) => WriteFS m where
     writeFile :: FilePath -> BS.ByteString -> m ()
 
+instance (Monad m) => Log (LoggingT (WithSeverity Text) m) where
+    logDebug = Log.logDebug
+    logInfo = Log.logInfo
+
 instance MonadHTTPGet IO where
-    getWith = Wreq.getWith
+    getWith options = asJSON <=< Wreq.getWith options
 
 instance WriteFS IO where
     writeFile = BS.writeFile
@@ -198,7 +215,7 @@ jiraURI (DomainName domain) (SearchQuery (JQL jql) start) =
 query :: (MonadHTTPGet m) => Auth -> DomainName -> SearchQuery -> m JiraResponse
 query credentials domain query = do
     let opts = defaults & auth ?~ credentials
-    response <- asJSON =<< getWith opts (show $ jiraURI domain query)
+    response <- getWith opts (show $ jiraURI domain query)
     return $ response ^. responseBody
 
 queryAll :: (Log m, MonadHTTPGet m) => (Int -> m JiraResponse) -> m [JiraIssue]
