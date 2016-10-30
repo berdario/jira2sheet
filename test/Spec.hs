@@ -30,7 +30,12 @@ import           Unsafe.Coerce                (unsafeCoerce)
 
 import           Lib
 
-mkFixture "FixtureInst" [''MonadHTTPGet, ''MonadThrow, ''Log]
+mkFixture "FixtureInst" [
+    ''MonadHTTPGet
+  , ''MonadThrow
+  , ''Log
+  , ''MonadInput]
+
 
 urlString2Query :: String -> Maybe SimpleQuery
 urlString2Query = fmap (parseSimpleQuery . Text.encodeUtf8 . Text.pack . uriQuery) . parseURI
@@ -70,16 +75,27 @@ response query = responseBuilder $ startParam query
         responseBuilder (Just start) = pure $ mockResponse $ unsafeCoerce $ dummyResponse dummyIssues start
         responseBuilder Nothing = error $ "wrong query: " <> query
 
+ignoreLogging = def {
+    _logDebug = void . pure
+  , _logInfo = void . pure
+}
+
 main :: IO ()
-main = hspec $
+main = hspec $ do
     describe "queryAll" $
         it "queries all 10 issues, 4 by 4" $ do
-            let queryInst = def {
+            let queryInst = ignoreLogging {
                 _getWith = \_ query -> log (startParam query) >>
-                     response query
-              , _logDebug = void . pure
-              , _logInfo = void . pure
+                                       response query
             }
             let query' start = query (basicAuth "" "") (DomainName "") (SearchQuery (JQL "") start)
             let calls = logTestFixture (queryAll query') queryInst
             catMaybes calls `shouldBe` [0, 4, 8, 10]
+    describe "getCredentials" $
+        it "" $ do
+            let credentialsInst = ignoreLogging {
+                _getInputLine = \_ -> pure "INPUT"
+              , _getPassword = \_ _ -> pure "PASSWORD"
+            }
+            let calls = logTestFixture getCredentials credentialsInst
+            calls `shouldBe` []

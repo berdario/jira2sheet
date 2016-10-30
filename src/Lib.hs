@@ -11,8 +11,10 @@ module Lib
       , MonadHTTPGet
       , WriteFS
       , Log
+      , MonadInput
       , query
       , queryAll
+      , getCredentials
       , JQL(..)
       , SearchQuery(..)
       , JiraStatus(..)
@@ -49,8 +51,8 @@ import           Network.Wreq               (Auth, asJSON, auth, defaults,
 import qualified Network.Wreq               as Wreq
 import           System.Console.Haskeline   (InputT, MonadException (..),
                                              RunIO (..), defaultSettings,
-                                             getInputLine, getPassword,
                                              runInputT)
+import qualified System.Console.Haskeline   as Haskeline
 
 class Log m where
      logDebug :: Text -> m ()
@@ -62,6 +64,10 @@ class (Monad m, MonadThrow m) => MonadHTTPGet m where
 class (Monad m) => WriteFS m where
     writeFile :: FilePath -> BS.ByteString -> m ()
 
+class (Monad m) => MonadInput m where
+    getInputLine :: String -> m String
+    getPassword :: Maybe Char -> String -> m String
+
 instance (Monad m) => Log (LoggingT (WithSeverity Text) m) where
     logDebug = Log.logDebug
     logInfo = Log.logInfo
@@ -71,6 +77,13 @@ instance MonadHTTPGet IO where
 
 instance WriteFS IO where
     writeFile = BS.writeFile
+
+runInput :: (MonadException m, MonadPlus m) => InputT m (Maybe a) -> m a
+runInput = maybe mzero return <=< runInputT defaultSettings
+
+instance MonadInput IO where
+    getInputLine = runInput . Haskeline.getInputLine
+    getPassword c = runInput . Haskeline.getPassword c
 
 instance (MonadHTTPGet m) => MonadHTTPGet (LoggingT message m) where
     getWith options = lift . getWith options
@@ -84,10 +97,13 @@ instance (MonadHTTPGet m) => MonadHTTPGet (MaybeT m) where
 instance (WriteFS m) => WriteFS (MaybeT m) where
     writeFile path = lift . writeFile path
 
-instance (MonadException m) => MonadException (LoggingT message m) where
-     controlIO f = LoggingT $ ReaderT $ \s -> controlIO $ \(RunIO run) -> let
-                    run' = RunIO (fmap (LoggingT . lift) . run . flip runLoggingT s)
-                    in flip runLoggingT s <$> f run'
+instance (MonadInput m) => MonadInput (LoggingT message m) where
+    getInputLine = lift . getInputLine
+    getPassword c = lift . getPassword c
+
+instance (MonadInput m) => MonadInput (MaybeT m) where
+    getInputLine = lift . getInputLine
+    getPassword c = lift . getPassword c
 
 data JiraStatus = JiraStatus {
     name :: Text
@@ -176,13 +192,10 @@ basicAuth :: String -> String -> Auth
 basicAuth user password = Wreq.basicAuth (encode user) (encode password)
     where encode = Text.encodeUtf8 . Text.pack
 
-runInput :: (MonadException m, MonadPlus m) => InputT m (Maybe a) -> m a
-runInput = maybe mzero return <=< runInputT defaultSettings
-
-getCredentials :: (MonadException m, MonadPlus m) => m Auth
+getCredentials :: (MonadInput m) => m Auth
 getCredentials = do
-    user <- runInput $ getInputLine "Jira username>"
-    password <- runInput $ getPassword Nothing "Jira password>"
+    user <- getInputLine "Jira username>"
+    password <- getPassword Nothing "Jira password>"
     return $ basicAuth user password
 
 jqlQuery = "project %3D RATM AND issueType not in (Epic%2C Sub-task) AND status not in (Done%2C Resolved%2C Backlog%2C \"Selected for Development\")"
@@ -235,7 +248,7 @@ queryRest query acc is count = do
     queryRest query (acc ++ is) is' (count + length is')
 
 
-jiraApp :: (MonadPlus m, Log m, MonadException m, MonadHTTPGet m, WriteFS m) =>
+jiraApp :: (MonadInput m, Log m, MonadHTTPGet m, WriteFS m) =>
             DomainName -> m ()
 jiraApp domain = do
     credentials <- getCredentials
