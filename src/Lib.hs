@@ -1,17 +1,20 @@
-{-# LANGUAGE DeriveAnyClass    #-}
-{-# LANGUAGE DeriveGeneric     #-}
-{-# LANGUAGE FlexibleContexts  #-}
-{-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE DeriveAnyClass        #-}
+{-# LANGUAGE DeriveGeneric         #-}
+{-# LANGUAGE FlexibleContexts      #-}
+{-# LANGUAGE FlexibleInstances     #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE OverloadedStrings     #-}
 
 module Lib
     (
         jiraApp
       , DomainName(..)
       , MonadHTTPGet
-      , WriteFS
+      , MonadWriteFS
+      , MonadReadFS
       , Log
       , MonadInput
+      , MonadOAuth
       , query
       , queryAll
       , getCredentials
@@ -21,6 +24,7 @@ module Lib
       , JiraFields(..)
       , JiraIssue(..)
       , JiraResponse(..)
+      , Credentials(..)
     ) where
 
 import           Prelude                    hiding (writeFile)
@@ -28,11 +32,14 @@ import           Prelude                    hiding (writeFile)
 import           Control.Lens               ((&), (?~), (^.))
 import           Control.Monad              (MonadPlus, mzero, (<=<))
 import           Control.Monad.Catch        (MonadThrow)
+import           Control.Monad.Except       (MonadError (..))
+import           Control.Monad.IO.Class     (liftIO)
 import           Control.Monad.Log          (LoggingT (..), WithSeverity,
                                              runLoggingT)
 import qualified Control.Monad.Log          as Log
 import           Control.Monad.Trans.Class  (lift)
-import           Control.Monad.Trans.Maybe  (MaybeT (..))
+import           Control.Monad.Trans.Either (EitherT (..), left, right)
+import           Control.Monad.Trans.Maybe  (MaybeT (..), mapMaybeT)
 import           Control.Monad.Trans.Reader (ReaderT (..))
 import           Data.Aeson                 (FromJSON)
 import           Data.ByteString            (ByteString)
@@ -45,6 +52,12 @@ import           Data.Text                  (Text)
 import qualified Data.Text                  as Text
 import qualified Data.Text.Encoding         as Text
 import           GHC.Generics               (Generic)
+import           Network.HTTP.Conduit       (Manager, newManager,
+                                             tlsManagerSettings)
+import           Network.OAuth.OAuth2       (AccessToken (..), OAuth2 (..),
+                                             appendQueryParam, authorizationUrl,
+                                             fetchAccessToken)
+import qualified Network.OAuth.OAuth2       as OAuth2
 import           Network.URI                (URI (..), URIAuth (..))
 import           Network.Wreq               (Auth, asJSON, auth, defaults,
                                              responseBody)
@@ -54,29 +67,43 @@ import           System.Console.Haskeline   (InputT, MonadException (..),
                                              runInputT)
 import qualified System.Console.Haskeline   as Haskeline
 
-class Log m where
+class (Monad m) => Log m where
      logDebug :: Text -> m ()
      logInfo :: Text -> m()
 
 class (Monad m, MonadThrow m) => MonadHTTPGet m where
     getWith :: (FromJSON a) => Wreq.Options -> String -> m (Wreq.Response a)
 
-class (Monad m) => WriteFS m where
+class (Monad m) => MonadWriteFS m where
     writeFile :: FilePath -> BS.ByteString -> m ()
+
+class (Monad m) => MonadReadFS m where
+    decryptSavedCredentials :: FilePath -> ByteString -> MaybeT m Credentials
 
 class (Monad m) => MonadInput m where
     getInputLine :: String -> m String
     getPassword :: Maybe Char -> String -> m String
 
+class (Monad m) => MonadOAuth m where
+    oauthAuthorize :: Manager -> OAuth2 -> ByteString -> m AccessToken
+    fetchRefreshToken :: Manager -> OAuth2 -> ByteString -> m AccessToken
+
 instance (Monad m) => Log (LoggingT (WithSeverity Text) m) where
     logDebug = Log.logDebug
     logInfo = Log.logInfo
 
+instance (Log m) => Log (EitherT e m) where
+    logDebug = lift . logDebug
+    logInfo = lift . logInfo
+
 instance MonadHTTPGet IO where
     getWith options = asJSON <=< Wreq.getWith options
 
-instance WriteFS IO where
+instance MonadWriteFS IO where
     writeFile = BS.writeFile
+
+instance MonadReadFS IO where
+    decryptSavedCredentials fp key = mzero -- TODO
 
 runInput :: (MonadException m, MonadPlus m) => InputT m (Maybe a) -> m a
 runInput = maybe mzero return <=< runInputT defaultSettings
@@ -85,17 +112,41 @@ instance MonadInput IO where
     getInputLine = runInput . Haskeline.getInputLine
     getPassword c = runInput . Haskeline.getPassword c
 
+instance MonadOAuth IO where
+    oauthAuthorize mgr oauth = error "not implemented"
+    fetchRefreshToken mgr oauth = error "not implemented"
+
 instance (MonadHTTPGet m) => MonadHTTPGet (LoggingT message m) where
     getWith options = lift . getWith options
 
-instance (WriteFS m) => WriteFS (LoggingT message m) where
+instance (MonadHTTPGet m) => MonadHTTPGet (EitherT e m) where
+    getWith options = lift . getWith options
+
+instance (MonadWriteFS m) => MonadWriteFS (LoggingT message m) where
     writeFile path = lift . writeFile path
+
+instance (MonadWriteFS m) => MonadWriteFS (EitherT e m) where
+    writeFile path = lift . writeFile path
+
+instance (MonadReadFS m) => MonadReadFS (LoggingT message m) where
+    decryptSavedCredentials fp = mapMaybeT lift . decryptSavedCredentials fp
+
+instance (MonadOAuth m) => MonadOAuth (LoggingT message m) where
+    oauthAuthorize mgr oauth = lift . oauthAuthorize mgr oauth
+    fetchRefreshToken mgr oauth = lift . fetchRefreshToken mgr oauth
+
+instance (MonadOAuth m) => MonadOAuth (MaybeT m) where
+    oauthAuthorize mgr oauth = lift . oauthAuthorize mgr oauth
+    fetchRefreshToken mgr oauth = lift . fetchRefreshToken mgr oauth
 
 instance (MonadHTTPGet m) => MonadHTTPGet (MaybeT m) where
     getWith options = lift . getWith options
 
-instance (WriteFS m) => WriteFS (MaybeT m) where
+instance (MonadWriteFS m) => MonadWriteFS (MaybeT m) where
     writeFile path = lift . writeFile path
+
+instance (MonadReadFS m) => MonadReadFS (MaybeT m) where
+    decryptSavedCredentials fp = mapMaybeT lift . decryptSavedCredentials fp
 
 instance (MonadInput m) => MonadInput (LoggingT message m) where
     getInputLine = lift . getInputLine
@@ -104,6 +155,12 @@ instance (MonadInput m) => MonadInput (LoggingT message m) where
 instance (MonadInput m) => MonadInput (MaybeT m) where
     getInputLine = lift . getInputLine
     getPassword c = lift . getPassword c
+
+instance (MonadInput m) => MonadInput (EitherT e m) where
+    getInputLine = lift . getInputLine
+    getPassword c = lift . getPassword c
+
+data Credentials = Credentials Auth AccessToken
 
 data JiraStatus = JiraStatus {
     name :: Text
@@ -192,11 +249,15 @@ basicAuth :: String -> String -> Auth
 basicAuth user password = Wreq.basicAuth (encode user) (encode password)
     where encode = Text.encodeUtf8 . Text.pack
 
-getCredentials :: (MonadInput m) => m Auth
-getCredentials = do
+getJiraCredentials :: (MonadInput m) => m Auth
+getJiraCredentials = do
     user <- getInputLine "Jira username>"
     password <- getPassword Nothing "Jira password>"
     return $ basicAuth user password
+
+getCredentials :: (MonadInput m, MonadReadFS m, MonadOAuth m, MonadWriteFS m) => m Auth
+getCredentials = getJiraCredentials
+
 
 jqlQuery = "project %3D RATM AND issueType not in (Epic%2C Sub-task) AND status not in (Done%2C Resolved%2C Backlog%2C \"Selected for Development\")"
 
@@ -248,7 +309,7 @@ queryRest query acc is count = do
     queryRest query (acc ++ is) is' (count + length is')
 
 
-jiraApp :: (MonadInput m, Log m, MonadHTTPGet m, WriteFS m) =>
+jiraApp :: (MonadInput m, Log m, MonadHTTPGet m, MonadWriteFS m, MonadReadFS m, MonadOAuth m) =>
             DomainName -> m ()
 jiraApp domain = do
     credentials <- getCredentials
@@ -256,3 +317,9 @@ jiraApp domain = do
     is <- queryAll queryChunk
     writeFile "jira.csv" $ encodeDefaultOrderedByName $ map (jiraToRecord domain) is
     logInfo "jira.csv created"
+
+oauth = OAuth2 { oauthClientId = "804038769221-786vn5l5m772h21masc5p4nm3gl995as.apps.googleusercontent.com"
+               , oauthClientSecret = "0JuYNS6p7ibK8jA38_rJBkWO"
+               , oauthCallback = Just "urn:ietf:wg:oauth:2.0:oob"
+               , oauthOAuthorizeEndpoint = "https://accounts.google.com/o/oauth2/auth"
+               , oauthAccessTokenEndpoint = "https://www.googleapis.com/oauth2/v4/token" }

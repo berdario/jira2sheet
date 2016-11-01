@@ -2,16 +2,19 @@
 
 module Main where
 
-import           Control.Monad             (void)
-import           Control.Monad.IO.Class    (MonadIO, liftIO)
-import           Control.Monad.Log         (LoggingT, Severity (Informational),
-                                            WithSeverity, discardSeverity,
-                                            msgSeverity, runLoggingT)
-import           Control.Monad.Trans.Maybe (MaybeT (..), runMaybeT)
-import           Data.Text                 (Text)
-import qualified Data.Text.IO              as Text
-import           Options.Applicative       (Parser, argument, execParser,
-                                            fullDesc, info, metavar, str)
+import           Control.Monad              (void)
+import           Control.Monad.IO.Class     (MonadIO, liftIO)
+import           Control.Monad.Log          (LoggingT, Severity (Informational),
+                                             WithSeverity, discardSeverity,
+                                             msgSeverity, runLoggingT)
+import           Control.Monad.Trans.Either (EitherT (..), left, right,
+                                             runEitherT)
+import           Control.Monad.Trans.Maybe  (MaybeT (..), runMaybeT)
+import           Data.ByteString.Lazy       (ByteString)
+import           Data.Text                  (Text)
+import qualified Data.Text.IO               as Text
+import           Options.Applicative        (Parser, argument, execParser,
+                                             fullDesc, info, metavar, str)
 
 
 import           Lib

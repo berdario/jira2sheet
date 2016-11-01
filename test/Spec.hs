@@ -1,16 +1,22 @@
-{-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE KindSignatures    #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE Rank2Types        #-}
-{-# LANGUAGE TemplateHaskell   #-}
+{-# LANGUAGE FlexibleContexts      #-}
+{-# LANGUAGE FlexibleInstances     #-}
+{-# LANGUAGE KindSignatures        #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE OverloadedStrings     #-}
+{-# LANGUAGE Rank2Types            #-}
+{-# LANGUAGE TemplateHaskell       #-}
+
 
 import           Prelude                      hiding (log)
 
-import           Control.Monad                (void)
+import           Control.Applicative          (Alternative (..))
+import           Control.Monad                (MonadPlus (..), void)
 import           Control.Monad.Catch          (MonadThrow)
 import           Control.Monad.Log            (MonadLog)
+import           Control.Monad.State.Class    (MonadState, gets, modify)
 import           Control.Monad.TestFixture
 import           Control.Monad.TestFixture.TH
+import           Control.Monad.Trans.Maybe    (MaybeT)
 import           Data.Aeson                   (FromJSON)
 import           Data.ByteString              (ByteString)
 import           Data.Maybe                   (catMaybes)
@@ -22,6 +28,7 @@ import           Network.HTTP.Client.Internal (CookieJar (..), Response (..),
 import           Network.HTTP.Types.Status    (ok200)
 import           Network.HTTP.Types.URI       (SimpleQuery, parseSimpleQuery)
 import           Network.HTTP.Types.Version   (HttpVersion (..))
+import           Network.OAuth.OAuth2         (AccessToken (..))
 import           Network.URI                  (URI (..), parseURI)
 import           Network.Wreq                 (basicAuth)
 import           Test.Hspec
@@ -31,11 +38,14 @@ import           Unsafe.Coerce                (unsafeCoerce)
 import           Lib
 
 mkFixture "FixtureInst" [
-    ''MonadHTTPGet
-  , ''MonadThrow
-  , ''Log
-  , ''MonadInput]
-
+      ''MonadHTTPGet
+    , ''MonadThrow
+    , ''Log
+    , ''MonadInput
+    , ''MonadWriteFS
+    , ''MonadReadFS
+    , ''MonadOAuth
+    ]
 
 urlString2Query :: String -> Maybe SimpleQuery
 urlString2Query = fmap (parseSimpleQuery . Text.encodeUtf8 . Text.pack . uriQuery) . parseURI
@@ -75,10 +85,26 @@ response query = responseBuilder $ startParam query
         responseBuilder (Just start) = pure $ mockResponse $ unsafeCoerce $ dummyResponse dummyIssues start
         responseBuilder Nothing = error $ "wrong query: " <> query
 
+ignoreLogging :: (Applicative m) => FixtureInst m
 ignoreLogging = def {
     _logDebug = void . pure
   , _logInfo = void . pure
 }
+
+data Event = Authorize | Refresh | Write FilePath deriving (Eq, Show)
+
+fakeToken = AccessToken "" Nothing Nothing Nothing Nothing
+fakeCredentials = Credentials (basicAuth "" "") fakeToken
+
+fakeDecryptCredentials :: (MonadState [Event] m) => MaybeT m Credentials
+fakeDecryptCredentials = do
+    saved <- gets $ elem $ Write "credentials.enc"
+    if saved
+        then pure fakeCredentials
+        else mzero
+
+logEvent :: MonadState [Event] m => Event -> m ()
+logEvent e = modify (e:)
 
 main :: IO ()
 main = hspec $ do
@@ -92,10 +118,14 @@ main = hspec $ do
             let calls = logTestFixture (queryAll query') queryInst
             catMaybes calls `shouldBe` [0, 4, 8, 10]
     describe "getCredentials" $
-        it "" $ do
+        it "After saving credentials, authorization is not performed again" $ do
             let credentialsInst = ignoreLogging {
                 _getInputLine = \_ -> pure "INPUT"
               , _getPassword = \_ _ -> pure "PASSWORD"
+              , _oauthAuthorize = \_ _ _ -> logEvent Authorize >> pure fakeToken
+              , _fetchRefreshToken = \_ _ _ -> logEvent Refresh >> pure fakeToken
+              , _decryptSavedCredentials = \_ _ -> fakeDecryptCredentials
+              , _writeFile = const . logEvent . Write
             }
-            let calls = logTestFixture getCredentials credentialsInst
-            calls `shouldBe` []
+            let (calls, _) = execTestFixture (getCredentials >> getCredentials) credentialsInst []
+            calls `shouldBe` [Authorize, Write "credentials.enc", Refresh]
