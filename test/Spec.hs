@@ -93,10 +93,10 @@ ignoreLogging = def {
 
 data Event = Authorize | Refresh | Write FilePath deriving (Eq, Show)
 
-fakeToken = AccessToken "" Nothing Nothing Nothing Nothing
-fakeCredentials = Credentials (basicAuth "" "") fakeToken
+fakeToken = AccessToken "" (Just "") Nothing Nothing Nothing
+fakeCredentials = SavedCredentials (basicAuth "" "") ""
 
-fakeDecryptCredentials :: (MonadState [Event] m) => MaybeT m Credentials
+fakeDecryptCredentials :: (MonadState [Event] m) => MaybeT m SavedCredentials
 fakeDecryptCredentials = do
     saved <- gets $ elem $ Write "credentials.enc"
     if saved
@@ -127,5 +127,6 @@ main = hspec $ do
               , _decryptSavedCredentials = \_ _ -> fakeDecryptCredentials
               , _writeFile = const . logEvent . Write
             }
-            let (calls, _) = execTestFixture (getCredentials >> getCredentials) credentialsInst []
-            calls `shouldBe` [Authorize, Write "credentials.enc", Refresh]
+            let getCredentials' = getCredentials undefined undefined
+            let (calls, _) = execTestFixture (getCredentials' >> getCredentials') credentialsInst []
+            reverse calls `shouldBe` [Authorize, Write "credentials.enc", Refresh]

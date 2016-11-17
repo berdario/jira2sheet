@@ -4,6 +4,7 @@
 {-# LANGUAGE FlexibleInstances     #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE OverloadedStrings     #-}
+{-# LANGUAGE StandaloneDeriving    #-}
 
 module Lib
     (
@@ -25,21 +26,25 @@ module Lib
       , JiraIssue(..)
       , JiraResponse(..)
       , Credentials(..)
+      , SavedCredentials(..)
     ) where
 
 import           Prelude                    hiding (writeFile)
 
+import           Control.Exception          (Exception, SomeException (..))
 import           Control.Lens               ((&), (?~), (^.))
-import           Control.Monad              (MonadPlus, mzero, (<=<))
+import           Control.Monad              (MonadPlus, join, mzero, unless,
+                                             (<=<))
 import           Control.Monad.Catch        (MonadThrow)
-import           Control.Monad.Except       (MonadError (..))
+import           Control.Monad.Except       (ExceptT (..), MonadError (..),
+                                             mapExceptT, runExceptT)
 import           Control.Monad.IO.Class     (liftIO)
 import           Control.Monad.Log          (LoggingT (..), WithSeverity,
                                              runLoggingT)
 import qualified Control.Monad.Log          as Log
 import           Control.Monad.Trans.Class  (lift)
-import           Control.Monad.Trans.Either (EitherT (..), left, right)
-import           Control.Monad.Trans.Maybe  (MaybeT (..), mapMaybeT)
+import           Control.Monad.Trans.Maybe  (MaybeT (..), mapMaybeT,
+                                             maybeToExceptT)
 import           Control.Monad.Trans.Reader (ReaderT (..))
 import           Data.Aeson                 (FromJSON)
 import           Data.ByteString            (ByteString)
@@ -47,16 +52,19 @@ import qualified Data.ByteString.Lazy       as BS
 import           Data.Csv                   (DefaultOrdered, ToField (toField),
                                              ToNamedRecord,
                                              encodeDefaultOrderedByName)
+import           Data.Either.Combinators    (mapLeft)
 import           Data.Monoid                ((<>))
 import           Data.Text                  (Text)
 import qualified Data.Text                  as Text
 import qualified Data.Text.Encoding         as Text
+import qualified Data.Text.Lazy             as LazyText
+import qualified Data.Text.Lazy.Encoding    as LazyText
 import           GHC.Generics               (Generic)
-import           Network.HTTP.Conduit       (Manager, newManager,
-                                             tlsManagerSettings)
+import           Network.HTTP.Conduit       (Manager, ManagerSettings,
+                                             newManager, tlsManagerSettings)
 import           Network.OAuth.OAuth2       (AccessToken (..), OAuth2 (..),
-                                             appendQueryParam, authorizationUrl,
-                                             fetchAccessToken)
+                                             QueryParams, appendQueryParam,
+                                             authorizationUrl, fetchAccessToken)
 import qualified Network.OAuth.OAuth2       as OAuth2
 import           Network.URI                (URI (..), URIAuth (..))
 import           Network.Wreq               (Auth, asJSON, auth, defaults,
@@ -66,76 +74,108 @@ import           System.Console.Haskeline   (InputT, MonadException (..),
                                              RunIO (..), defaultSettings,
                                              runInputT)
 import qualified System.Console.Haskeline   as Haskeline
+import           UnexceptionalIO            (UIO, fromIO, unsafeFromIO)
+import           Web.Browser                (openBrowser)
 
 class (Monad m) => Log m where
      logDebug :: Text -> m ()
      logInfo :: Text -> m()
 
-class (Monad m, MonadThrow m) => MonadHTTPGet m where
+data Error = Error String deriving (Show, Eq)
+deriving instance Exception Error
+
+class (Monad m ) => MonadHTTPGet m where -- TODO add back MonadThrow, change to MonadError
     getWith :: (FromJSON a) => Wreq.Options -> String -> m (Wreq.Response a)
 
 class (Monad m) => MonadWriteFS m where
     writeFile :: FilePath -> BS.ByteString -> m ()
 
 class (Monad m) => MonadReadFS m where
-    decryptSavedCredentials :: FilePath -> ByteString -> MaybeT m Credentials
+    decryptSavedCredentials :: FilePath -> ByteString -> MaybeT m SavedCredentials
 
 class (Monad m) => MonadInput m where
     getInputLine :: String -> m String
     getPassword :: Maybe Char -> String -> m String
 
 class (Monad m) => MonadOAuth m where
-    oauthAuthorize :: Manager -> OAuth2 -> ByteString -> m AccessToken
+    newTls :: ManagerSettings -> m Manager
+    oauthAuthorize :: Manager -> OAuth2 -> QueryParams -> m AccessToken
     fetchRefreshToken :: Manager -> OAuth2 -> ByteString -> m AccessToken
 
 instance (Monad m) => Log (LoggingT (WithSeverity Text) m) where
     logDebug = Log.logDebug
     logInfo = Log.logInfo
 
-instance (Log m) => Log (EitherT e m) where
+instance (Log m) => Log (ExceptT e m) where
     logDebug = lift . logDebug
     logInfo = lift . logInfo
 
-instance MonadHTTPGet IO where
-    getWith options = asJSON <=< Wreq.getWith options
+instance MonadHTTPGet UIO where
+    getWith options = unsafeFromIO . (asJSON <=< Wreq.getWith options)
 
-instance MonadWriteFS IO where
-    writeFile = BS.writeFile
+instance MonadWriteFS UIO where
+    writeFile path = unsafeFromIO . BS.writeFile path
 
-instance MonadReadFS IO where
+instance MonadReadFS UIO where
     decryptSavedCredentials fp key = mzero -- TODO
 
-runInput :: (MonadException m, MonadPlus m) => InputT m (Maybe a) -> m a
-runInput = maybe mzero return <=< runInputT defaultSettings
+runInput :: InputT IO (Maybe a) -> MaybeT UIO a -- TODO add back MonadException, convert to MonadError?
+runInput = MaybeT . unsafeFromIO . runInputT defaultSettings
 
-instance MonadInput IO where
+instance MonadInput (MaybeT UIO) where
     getInputLine = runInput . Haskeline.getInputLine
     getPassword c = runInput . Haskeline.getPassword c
 
-instance MonadOAuth IO where
-    oauthAuthorize mgr oauth = error "not implemented"
-    fetchRefreshToken mgr oauth = error "not implemented"
+encode :: String -> ByteString
+encode = Text.encodeUtf8 . Text.pack
+
+decode :: ByteString -> String
+decode = Text.unpack . Text.decodeUtf8
+
+lazyDecode :: BS.ByteString -> String
+lazyDecode = LazyText.unpack . LazyText.decodeUtf8
+
+oauthToExcept :: IO (Either BS.ByteString a) -> ExceptT SomeException (MaybeT UIO) a
+oauthToExcept = ExceptT . lift . fmap join . fromIO . fmap ( mapLeft (SomeException . Error . lazyDecode))
+
+instance MonadOAuth (ExceptT SomeException (MaybeT UIO)) where
+    newTls = ExceptT . lift . fromIO . newManager
+
+    oauthAuthorize mgr oauth params = do
+        let url = decode $ authorizationUrl oauth `appendQueryParam` params
+        opened <- lift $ lift $ unsafeFromIO $ openBrowser url
+        unless opened $ lift $ lift $ unsafeFromIO $ putStrLn $ "Unable to open the browser for you, please visit: " <> url
+        code <- lift $ getInputLine "Paste here the code obtained from the browser>"
+        --code <- maybeToExceptT (SomeException $ Error "No code from user") $ getInputLine "Paste here the code obtained from the browser"
+        oauthToExcept $ fetchAccessToken mgr oauth $ encode code
+
+    fetchRefreshToken mgr oauth = oauthToExcept . OAuth2.fetchRefreshToken mgr oauth
 
 instance (MonadHTTPGet m) => MonadHTTPGet (LoggingT message m) where
     getWith options = lift . getWith options
 
-instance (MonadHTTPGet m) => MonadHTTPGet (EitherT e m) where
+instance (MonadHTTPGet m) => MonadHTTPGet (ExceptT e m) where
     getWith options = lift . getWith options
 
 instance (MonadWriteFS m) => MonadWriteFS (LoggingT message m) where
     writeFile path = lift . writeFile path
 
-instance (MonadWriteFS m) => MonadWriteFS (EitherT e m) where
+instance (MonadWriteFS m) => MonadWriteFS (ExceptT e m) where
     writeFile path = lift . writeFile path
 
 instance (MonadReadFS m) => MonadReadFS (LoggingT message m) where
     decryptSavedCredentials fp = mapMaybeT lift . decryptSavedCredentials fp
 
+instance (MonadReadFS m) => MonadReadFS (ExceptT e m) where
+    decryptSavedCredentials fp = mapMaybeT lift . decryptSavedCredentials fp
+
 instance (MonadOAuth m) => MonadOAuth (LoggingT message m) where
+    newTls = lift . newTls
     oauthAuthorize mgr oauth = lift . oauthAuthorize mgr oauth
     fetchRefreshToken mgr oauth = lift . fetchRefreshToken mgr oauth
 
 instance (MonadOAuth m) => MonadOAuth (MaybeT m) where
+    newTls = lift . newTls
     oauthAuthorize mgr oauth = lift . oauthAuthorize mgr oauth
     fetchRefreshToken mgr oauth = lift . fetchRefreshToken mgr oauth
 
@@ -152,14 +192,12 @@ instance (MonadInput m) => MonadInput (LoggingT message m) where
     getInputLine = lift . getInputLine
     getPassword c = lift . getPassword c
 
-instance (MonadInput m) => MonadInput (MaybeT m) where
+instance (MonadInput m) => MonadInput (ExceptT e m) where
     getInputLine = lift . getInputLine
     getPassword c = lift . getPassword c
 
-instance (MonadInput m) => MonadInput (EitherT e m) where
-    getInputLine = lift . getInputLine
-    getPassword c = lift . getPassword c
-
+type RefreshToken = ByteString
+data SavedCredentials = SavedCredentials Auth RefreshToken
 data Credentials = Credentials Auth AccessToken
 
 data JiraStatus = JiraStatus {
@@ -209,7 +247,7 @@ instance ToField Bool where
     toField False = "No"
 
 showBS :: (Show a) => a -> ByteString
-showBS = Text.encodeUtf8 . Text.pack . show
+showBS = encode . show
 
 instance ToField URI where
     toField = showBS
@@ -255,11 +293,31 @@ getJiraCredentials = do
     password <- getPassword Nothing "Jira password>"
     return $ basicAuth user password
 
-getCredentials :: (MonadInput m, MonadReadFS m, MonadOAuth m, MonadWriteFS m) => m Auth
-getCredentials = getJiraCredentials
+saveCredentials :: MonadWriteFS m => SavedCredentials -> m ()
+saveCredentials _ = pure () -- writeFile "credentials.enc" undefined -- TODO
+
+authorizeAndSave :: (MonadOAuth m, MonadWriteFS m) => Manager -> OAuth2 -> Auth -> m AccessToken
+authorizeAndSave mgr oauth jCredentials = do
+    googleRefresh <- oauthAuthorize mgr oauth [("scope", "https://www.googleapis.com/auth/drive")]
+    traverse (saveCredentials . SavedCredentials jCredentials) $ refreshToken googleRefresh
+    pure googleRefresh
+
+getCredentials :: (MonadInput m, MonadReadFS m, MonadOAuth m, MonadWriteFS m) => Manager -> OAuth2 -> m Credentials
+getCredentials mgr oauth = do
+    credentials <- runMaybeT $ decryptSavedCredentials undefined undefined
+    let authorizeAndSave' = authorizeAndSave mgr oauth
+    case credentials of
+        Nothing -> do
+            jCredentials <- getJiraCredentials
+            Credentials jCredentials <$> authorizeAndSave' jCredentials
+        (Just (SavedCredentials jCred tkn)) ->
+            Credentials jCred <$> fetchRefreshToken mgr oauth tkn
+            -- tokenResponse <- runExceptT $ fetchRefreshToken mgr oauth tkn
+            -- Credentials jCred <$> either (const $ authorizeAndSave' jCred) pure tokenResponse
 
 
 jqlQuery = "project %3D RATM AND issueType not in (Epic%2C Sub-task) AND status not in (Done%2C Resolved%2C Backlog%2C \"Selected for Development\")"
+-- jqlQuery = "project %3D DEV AND \"Assigned Team\" %3D \"Dire Straits\" AND issueType not in (Epic%2C Sub-task) AND status not in (Done%2C Resolved%2C Backlog%2C \"Selected for Development\")"
 
 newtype DomainName = DomainName String
 newtype JQL = JQL String
@@ -312,8 +370,9 @@ queryRest query acc is count = do
 jiraApp :: (MonadInput m, Log m, MonadHTTPGet m, MonadWriteFS m, MonadReadFS m, MonadOAuth m) =>
             DomainName -> m ()
 jiraApp domain = do
-    credentials <- getCredentials
-    let queryChunk start = query credentials domain (SearchQuery (JQL jqlQuery) start)
+    mgr <- newTls tlsManagerSettings
+    Credentials auth tkn <- getCredentials mgr oauth
+    let queryChunk start = query auth domain (SearchQuery (JQL jqlQuery) start)
     is <- queryAll queryChunk
     writeFile "jira.csv" $ encodeDefaultOrderedByName $ map (jiraToRecord domain) is
     logInfo "jira.csv created"

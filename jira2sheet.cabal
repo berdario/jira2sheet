@@ -33,6 +33,8 @@ library
                      , hoauth2
                      , mtl
                      , either
+                     , unexceptionalio
+                     , open-browser
   default-language:    Haskell2010
 
 executable jira2sheet
@@ -46,7 +48,7 @@ executable jira2sheet
                      , transformers
                      , text
                      , bytestring
-                     , either
+                     , unexceptionalio
   default-language:    Haskell2010
 
 test-suite jira2sheet-test
