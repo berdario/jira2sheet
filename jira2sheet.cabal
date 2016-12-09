@@ -35,6 +35,10 @@ library
                      , either
                      , unexceptionalio
                      , open-browser
+                     , argon2
+                     , hostname
+                     , cryptonite
+                     , memory
   default-language:    Haskell2010
 
 executable jira2sheet

@@ -3,13 +3,14 @@
 {-# LANGUAGE KindSignatures        #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE OverloadedStrings     #-}
+{-# LANGUAGE QuasiQuotes           #-}
 {-# LANGUAGE Rank2Types            #-}
 {-# LANGUAGE TemplateHaskell       #-}
-
 
 import           Prelude                      hiding (log)
 
 import           Control.Applicative          (Alternative (..))
+import           Control.Exception            (Exception (..), SomeException)
 import           Control.Monad                (MonadPlus (..), void)
 import           Control.Monad.Catch          (MonadThrow)
 import           Control.Monad.Log            (MonadLog)
@@ -37,15 +38,16 @@ import           Unsafe.Coerce                (unsafeCoerce)
 
 import           Lib
 
-mkFixture "FixtureInst" [
-      ''MonadHTTPGet
-    , ''MonadThrow
-    , ''Log
-    , ''MonadInput
-    , ''MonadWriteFS
-    , ''MonadReadFS
-    , ''MonadOAuth
-    ]
+mkFixture "FixtureInst" [ts|
+      MonadHTTPGet
+    , MonadThrow
+    , Log
+    , MonadInput
+    , MonadWriteFS
+    , MonadReadFS
+    , MonadOAuth
+    , MonadCrypto
+    |]
 
 urlString2Query :: String -> Maybe SimpleQuery
 urlString2Query = fmap (parseSimpleQuery . Text.encodeUtf8 . Text.pack . uriQuery) . parseURI
@@ -94,7 +96,7 @@ ignoreLogging = def {
 data Event = Authorize | Refresh | Write FilePath deriving (Eq, Show)
 
 fakeToken = AccessToken "" (Just "") Nothing Nothing Nothing
-fakeCredentials = SavedCredentials (basicAuth "" "") ""
+fakeCredentials = SavedCredentials "" "" ""
 
 fakeDecryptCredentials :: (MonadState [Event] m) => MaybeT m SavedCredentials
 fakeDecryptCredentials = do
@@ -105,6 +107,10 @@ fakeDecryptCredentials = do
 
 logEvent :: MonadState [Event] m => Event -> m ()
 logEvent e = modify (e:)
+
+shouldHaveCalled :: (Eq a, Show a, Exception e) => Either e ([a], t) -> [a] -> Expectation
+shouldHaveCalled (Right (calls, _)) expected = reverse calls `shouldBe` expected
+shouldHaveCalled (Left e) _ = expectationFailure $ displayException e
 
 main :: IO ()
 main = hspec $ do
@@ -126,7 +132,9 @@ main = hspec $ do
               , _fetchRefreshToken = \_ _ _ -> logEvent Refresh >> pure fakeToken
               , _decryptSavedCredentials = \_ _ -> fakeDecryptCredentials
               , _writeFile = const . logEvent . Write
+              , _getEntropy = const $ pure "000011112222"
+              , _getSalt = pure "salt"
             }
             let getCredentials' = getCredentials undefined undefined
-            let (calls, _) = execTestFixture (getCredentials' >> getCredentials') credentialsInst []
-            reverse calls `shouldBe` [Authorize, Write "credentials.enc", Refresh]
+            let result = execTestFixtureT (getCredentials' >> getCredentials') credentialsInst []
+            result `shouldHaveCalled` [Authorize, Write "credentials.enc", Refresh]

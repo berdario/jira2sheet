@@ -16,6 +16,7 @@ module Lib
       , Log
       , MonadInput
       , MonadOAuth
+      , MonadCrypto
       , query
       , queryAll
       , getCredentials
@@ -29,53 +30,63 @@ module Lib
       , SavedCredentials(..)
     ) where
 
-import           Prelude                    hiding (writeFile)
+import           Prelude                      hiding (take, writeFile)
 
-import           Control.Exception          (Exception, SomeException (..))
-import           Control.Lens               ((&), (?~), (^.))
-import           Control.Monad              (MonadPlus, join, mzero, unless,
-                                             (<=<))
-import           Control.Monad.Catch        (MonadThrow)
-import           Control.Monad.Except       (ExceptT (..), MonadError (..),
-                                             mapExceptT, runExceptT)
-import           Control.Monad.IO.Class     (liftIO)
-import           Control.Monad.Log          (LoggingT (..), WithSeverity,
-                                             runLoggingT)
-import qualified Control.Monad.Log          as Log
-import           Control.Monad.Trans.Class  (lift)
-import           Control.Monad.Trans.Maybe  (MaybeT (..), mapMaybeT,
-                                             maybeToExceptT)
-import           Control.Monad.Trans.Reader (ReaderT (..))
-import           Data.Aeson                 (FromJSON)
-import           Data.ByteString            (ByteString)
-import qualified Data.ByteString.Lazy       as BS
-import           Data.Csv                   (DefaultOrdered, ToField (toField),
-                                             ToNamedRecord,
-                                             encodeDefaultOrderedByName)
-import           Data.Either.Combinators    (mapLeft)
-import           Data.Monoid                ((<>))
-import           Data.Text                  (Text)
-import qualified Data.Text                  as Text
-import qualified Data.Text.Encoding         as Text
-import qualified Data.Text.Lazy             as LazyText
-import qualified Data.Text.Lazy.Encoding    as LazyText
-import           GHC.Generics               (Generic)
-import           Network.HTTP.Conduit       (Manager, ManagerSettings,
-                                             newManager, tlsManagerSettings)
-import           Network.OAuth.OAuth2       (AccessToken (..), OAuth2 (..),
-                                             QueryParams, appendQueryParam,
-                                             authorizationUrl, fetchAccessToken)
-import qualified Network.OAuth.OAuth2       as OAuth2
-import           Network.URI                (URI (..), URIAuth (..))
-import           Network.Wreq               (Auth, asJSON, auth, defaults,
-                                             responseBody)
-import qualified Network.Wreq               as Wreq
-import           System.Console.Haskeline   (InputT, MonadException (..),
-                                             RunIO (..), defaultSettings,
-                                             runInputT)
-import qualified System.Console.Haskeline   as Haskeline
-import           UnexceptionalIO            (UIO, fromIO, unsafeFromIO)
-import           Web.Browser                (openBrowser)
+import           Control.Exception            (Exception, SomeException (..))
+import           Control.Lens                 ((&), (?~), (^.))
+import           Control.Monad                (MonadPlus, join, mzero, unless,
+                                               (<=<))
+import           Control.Monad.Catch          (MonadThrow)
+import           Control.Monad.Except         (ExceptT (..), MonadError (..),
+                                               mapExceptT, runExceptT,
+                                               withExceptT)
+import           Control.Monad.IO.Class       (liftIO)
+import           Control.Monad.Log            (LoggingT (..), WithSeverity,
+                                               runLoggingT)
+import qualified Control.Monad.Log            as Log
+import           Control.Monad.Trans.Class    (MonadTrans, lift)
+import           Control.Monad.Trans.Maybe    (MaybeT (..), mapMaybeT,
+                                               maybeToExceptT)
+import           Control.Monad.Trans.Reader   (ReaderT (..))
+import           Crypto.Argon2                (defaultHashOptions, hash)
+import qualified Crypto.Cipher.ChaChaPoly1305 as ChaCha
+import           Crypto.Error                 (CryptoError, eitherCryptoError)
+import qualified Crypto.Random.Entropy        as Entropy
+import           Data.Aeson                   (FromJSON)
+import qualified Data.ByteArray               as B
+import           Data.ByteArray.Pack          (fill, putBytes)
+import           Data.ByteString              (ByteString)
+import qualified Data.ByteString              as BS
+import qualified Data.ByteString.Lazy         as LBS
+import           Data.Csv                     (DefaultOrdered,
+                                               ToField (toField), ToNamedRecord,
+                                               encodeDefaultOrderedByName)
+import           Data.Either.Combinators      (mapLeft)
+import           Data.Monoid                  ((<>))
+import           Data.Text                    (Text)
+import qualified Data.Text                    as Text
+import qualified Data.Text.Encoding           as Text
+import qualified Data.Text.Lazy               as LazyText
+import qualified Data.Text.Lazy.Encoding      as LazyText
+import           GHC.Generics                 (Generic)
+import           Network.HostName             (getHostName)
+import           Network.HTTP.Conduit         (Manager, ManagerSettings,
+                                               newManager, tlsManagerSettings)
+import           Network.OAuth.OAuth2         (AccessToken (..), OAuth2 (..),
+                                               QueryParams, appendQueryParam,
+                                               authorizationUrl,
+                                               fetchAccessToken)
+import qualified Network.OAuth.OAuth2         as OAuth2
+import           Network.URI                  (URI (..), URIAuth (..))
+import           Network.Wreq                 (Auth, asJSON, auth, defaults,
+                                               responseBody)
+import qualified Network.Wreq                 as Wreq
+import           System.Console.Haskeline     (InputT, MonadException (..),
+                                               RunIO (..), defaultSettings,
+                                               runInputT)
+import qualified System.Console.Haskeline     as Haskeline
+import           UnexceptionalIO              (UIO, fromIO, unsafeFromIO)
+import           Web.Browser                  (openBrowser)
 
 class (Monad m) => Log m where
      logDebug :: Text -> m ()
@@ -88,7 +99,7 @@ class (Monad m ) => MonadHTTPGet m where -- TODO add back MonadThrow, change to 
     getWith :: (FromJSON a) => Wreq.Options -> String -> m (Wreq.Response a)
 
 class (Monad m) => MonadWriteFS m where
-    writeFile :: FilePath -> BS.ByteString -> m ()
+    writeFile :: FilePath -> LBS.ByteString -> m ()
 
 class (Monad m) => MonadReadFS m where
     decryptSavedCredentials :: FilePath -> ByteString -> MaybeT m SavedCredentials
@@ -102,6 +113,19 @@ class (Monad m) => MonadOAuth m where
     oauthAuthorize :: Manager -> OAuth2 -> QueryParams -> m AccessToken
     fetchRefreshToken :: Manager -> OAuth2 -> ByteString -> m AccessToken
 
+class (Monad m) => MonadCrypto m where
+    getSalt :: m ByteString
+    getEntropy :: Int -> m ByteString
+
+instance (MonadTrans t, Monad (t UIO)) => MonadCrypto (ExceptT SomeException (t UIO)) where
+    getSalt = lift $ lift $ unsafeFromIO $ fmap encode getHostName
+    getEntropy = ExceptT . lift . fromIO . Entropy.getEntropy
+
+
+instance (MonadCrypto m) => MonadCrypto (LoggingT message m) where
+    getSalt = lift getSalt
+    getEntropy = lift . getEntropy
+
 instance (Monad m) => Log (LoggingT (WithSeverity Text) m) where
     logDebug = Log.logDebug
     logInfo = Log.logInfo
@@ -114,7 +138,7 @@ instance MonadHTTPGet UIO where
     getWith options = unsafeFromIO . (asJSON <=< Wreq.getWith options)
 
 instance MonadWriteFS UIO where
-    writeFile path = unsafeFromIO . BS.writeFile path
+    writeFile path = unsafeFromIO . LBS.writeFile path
 
 instance MonadReadFS UIO where
     decryptSavedCredentials fp key = mzero -- TODO
@@ -132,10 +156,10 @@ encode = Text.encodeUtf8 . Text.pack
 decode :: ByteString -> String
 decode = Text.unpack . Text.decodeUtf8
 
-lazyDecode :: BS.ByteString -> String
+lazyDecode :: LBS.ByteString -> String
 lazyDecode = LazyText.unpack . LazyText.decodeUtf8
 
-oauthToExcept :: IO (Either BS.ByteString a) -> ExceptT SomeException (MaybeT UIO) a
+oauthToExcept :: IO (Either LBS.ByteString a) -> ExceptT SomeException (MaybeT UIO) a
 oauthToExcept = ExceptT . lift . fmap join . fromIO . fmap ( mapLeft (SomeException . Error . lazyDecode))
 
 instance MonadOAuth (ExceptT SomeException (MaybeT UIO)) where
@@ -197,7 +221,9 @@ instance (MonadInput m) => MonadInput (ExceptT e m) where
     getPassword c = lift . getPassword c
 
 type RefreshToken = ByteString
-data SavedCredentials = SavedCredentials Auth RefreshToken
+type JiraUsername = String
+type JiraPassword = String
+data SavedCredentials = SavedCredentials JiraUsername JiraPassword RefreshToken deriving (Show, Read)
 data Credentials = Credentials Auth AccessToken
 
 data JiraStatus = JiraStatus {
@@ -287,31 +313,67 @@ basicAuth :: String -> String -> Auth
 basicAuth user password = Wreq.basicAuth (encode user) (encode password)
     where encode = Text.encodeUtf8 . Text.pack
 
-getJiraCredentials :: (MonadInput m) => m Auth
+getJiraCredentials :: (MonadInput m) => m (JiraUsername, JiraPassword)
 getJiraCredentials = do
     user <- getInputLine "Jira username>"
-    password <- getPassword Nothing "Jira password>"
-    return $ basicAuth user password
+    password <- getPassword (Just '*') "Jira password>"
+    return (user, password)
 
-saveCredentials :: MonadWriteFS m => SavedCredentials -> m ()
-saveCredentials _ = pure () -- writeFile "credentials.enc" undefined -- TODO
+stretchKey :: (MonadCrypto m, MonadError SomeException m) => ByteString -> m B.ScrubbedBytes
+stretchKey pass = do
+    salt <- getSalt
+    let padding = BS.take (8 - BS.length salt) "\0\0\0\0\0\0\0\0"
+    liftCrypto $ toScrubbed $ BS.take 32 $ hash defaultHashOptions pass (salt <> padding)
 
-authorizeAndSave :: (MonadOAuth m, MonadWriteFS m) => Manager -> OAuth2 -> Auth -> m AccessToken
-authorizeAndSave mgr oauth jCredentials = do
+toScrubbed :: ByteString -> Either Error B.ScrubbedBytes
+toScrubbed bs = mapLeft Error $ fill l $ putBytes bs
+    where
+        l = BS.length bs
+
+liftCrypto :: (Exception e, MonadCrypto m, MonadError SomeException m) => Either e a -> m a
+liftCrypto = either (throwError . SomeException) pure
+
+encryptCredentials :: (MonadCrypto m, MonadError SomeException m) => ByteString -> SavedCredentials -> m ByteString
+encryptCredentials password creds = do
+    nonce <- getEntropy 12
+    key <- stretchKey password
+    liftCrypto $ encrypt nonce key $ encode $ show creds
+
+encrypt
+    :: ByteString -- nonce (12 random bytes)
+    -> B.ScrubbedBytes -- symmetric key
+    -> ByteString -- input plaintext to be encrypted
+    -> Either CryptoError ByteString -- ciphertext with a 128-bit tag attached
+encrypt nonce key plaintext = eitherCryptoError $ do
+    st1 <- ChaCha.nonce12 nonce >>= ChaCha.initialize key
+    let
+        st2 = ChaCha.finalizeAAD $ ChaCha.appendAAD BS.empty st1
+        (out, st3) = ChaCha.encrypt plaintext st2
+        auth = ChaCha.finalize st3
+    return $ out `B.append` B.convert auth
+
+saveCredentials :: (MonadWriteFS m, MonadInput m, MonadCrypto m, MonadError SomeException m) => SavedCredentials -> m ()
+saveCredentials creds = do
+    pass <- getPassword (Just '*') "Please insert an encryption password for your credentials>"
+    encryptedCreds <- encryptCredentials (encode pass) creds
+    writeFile "credentials.enc" $ LBS.fromStrict encryptedCreds
+
+authorizeAndSave :: (MonadOAuth m, MonadWriteFS m, MonadInput m, MonadCrypto m, MonadError SomeException m) => Manager -> OAuth2 -> (RefreshToken -> SavedCredentials) -> m AccessToken
+authorizeAndSave mgr oauth builder = do
     googleRefresh <- oauthAuthorize mgr oauth [("scope", "https://www.googleapis.com/auth/drive")]
-    traverse (saveCredentials . SavedCredentials jCredentials) $ refreshToken googleRefresh
+    traverse (saveCredentials . builder) $ refreshToken googleRefresh
     pure googleRefresh
 
-getCredentials :: (MonadInput m, MonadReadFS m, MonadOAuth m, MonadWriteFS m) => Manager -> OAuth2 -> m Credentials
+getCredentials :: (MonadInput m, MonadReadFS m, MonadOAuth m, MonadWriteFS m, MonadCrypto m, MonadError SomeException m) => Manager -> OAuth2 -> m Credentials
 getCredentials mgr oauth = do
     credentials <- runMaybeT $ decryptSavedCredentials undefined undefined
     let authorizeAndSave' = authorizeAndSave mgr oauth
     case credentials of
         Nothing -> do
-            jCredentials <- getJiraCredentials
-            Credentials jCredentials <$> authorizeAndSave' jCredentials
-        (Just (SavedCredentials jCred tkn)) ->
-            Credentials jCred <$> fetchRefreshToken mgr oauth tkn
+            (user, pass) <- getJiraCredentials
+            Credentials (basicAuth user pass) <$> authorizeAndSave' (SavedCredentials user pass)
+        (Just (SavedCredentials user pass tkn)) ->
+            Credentials (basicAuth user pass) <$> fetchRefreshToken mgr oauth tkn
             -- tokenResponse <- runExceptT $ fetchRefreshToken mgr oauth tkn
             -- Credentials jCred <$> either (const $ authorizeAndSave' jCred) pure tokenResponse
 
@@ -367,7 +429,7 @@ queryRest query acc is count = do
     queryRest query (acc ++ is) is' (count + length is')
 
 
-jiraApp :: (MonadInput m, Log m, MonadHTTPGet m, MonadWriteFS m, MonadReadFS m, MonadOAuth m) =>
+jiraApp :: (MonadInput m, Log m, MonadHTTPGet m, MonadWriteFS m, MonadReadFS m, MonadOAuth m, MonadCrypto m, MonadError SomeException m) =>
             DomainName -> m ()
 jiraApp domain = do
     mgr <- newTls tlsManagerSettings
