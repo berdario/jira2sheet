@@ -40,9 +40,10 @@ module Lib
 
 import           Prelude                      hiding (readFile, take, writeFile)
 
+import           Control.Applicative          (empty)
 import           Control.Exception            (Exception (..),
                                                SomeException (..))
-import           Control.Lens                 ((&), (?~), (^.))
+import           Control.Lens                 ((&), (.~), (?~), (^.))
 import           Control.Monad                (MonadPlus, join, unless, (<=<))
 import           Control.Monad.Catch          (MonadThrow)
 import           Control.Monad.Except         (ExceptT (..), MonadError (..),
@@ -61,7 +62,7 @@ import           Crypto.Argon2                (HashOptions (..),
 import qualified Crypto.Cipher.ChaChaPoly1305 as ChaCha
 import           Crypto.Error                 (CryptoError, eitherCryptoError)
 import qualified Crypto.Random.Entropy        as Entropy
-import           Data.Aeson                   (FromJSON)
+import           Data.Aeson                   (FromJSON (..), Value (..), (.:))
 import qualified Data.ByteArray               as B
 import           Data.ByteArray.Pack          (fill, putBytes)
 import           Data.ByteString              (ByteString)
@@ -88,8 +89,9 @@ import           Network.OAuth.OAuth2         (AccessToken (..), OAuth2 (..),
 import qualified Network.OAuth.OAuth2         as OAuth2
 import           Network.URI                  (URI (..), URIAuth (..))
 import           Network.Wreq                 (Auth, asJSON, auth, defaults,
-                                               responseBody)
+                                               header, param, responseBody)
 import qualified Network.Wreq                 as Wreq
+import           Network.Wreq.Types           (Postable)
 import           System.Console.Haskeline     (InputT, MonadException (..),
                                                RunIO (..), defaultSettings,
                                                runInputT)
@@ -112,6 +114,9 @@ deriving instance Exception Error
 
 class (Monad m ) => MonadHTTPGet m where -- TODO add back MonadThrow, change to MonadError
     getWith :: (FromJSON a) => Wreq.Options -> String -> m (Wreq.Response a)
+
+class (Monad m) => MonadHTTP m where
+    postWith :: (Postable a, FromJSON b) => Wreq.Options -> String -> a -> m (Wreq.Response b)
 
 class (Monad m) => MonadWriteFS m where
     writeFile :: FilePath -> LBS.ByteString -> m ()
@@ -158,6 +163,9 @@ instance (Log m) => Log (ExceptT e m) where
 instance MonadHTTPGet UIO where
     getWith options = unsafeFromIO . (asJSON <=< Wreq.getWith options)
 
+instance MonadHTTP UIO where
+    postWith options body = unsafeFromIO . (asJSON <=< Wreq.postWith options body)
+
 instance MonadWriteFS UIO where
     writeFile path = unsafeFromIO . LBS.writeFile path
 
@@ -203,8 +211,14 @@ instance MonadOAuth (ExceptT SomeException (MaybeT UIO)) where
 instance (MonadHTTPGet m) => MonadHTTPGet (LoggingT message m) where
     getWith options = lift . getWith options
 
+instance (MonadHTTP m) => MonadHTTP (LoggingT message m) where
+    postWith options body = lift . postWith options body
+
 instance (MonadHTTPGet m) => MonadHTTPGet (ExceptT e m) where
     getWith options = lift . getWith options
+
+instance (MonadHTTP m) => MonadHTTP (ExceptT e m) where
+    postWith options body = lift . postWith options body
 
 instance (MonadWriteFS m) => MonadWriteFS (LoggingT message m) where
     writeFile path = lift . writeFile path
@@ -232,6 +246,9 @@ instance (MonadOAuth m) => MonadOAuth (MaybeT m) where
 
 instance (MonadHTTPGet m) => MonadHTTPGet (MaybeT m) where
     getWith options = lift . getWith options
+
+instance (MonadHTTP m) => MonadHTTP (MaybeT m) where
+    postWith options body = lift . postWith options body
 
 instance (MonadWriteFS m) => MonadWriteFS (MaybeT m) where
     writeFile path = lift . writeFile path
@@ -276,6 +293,14 @@ data JiraResponse = JiraResponse {
   , total      :: Int
   , issues     :: [JiraIssue]
 } deriving (Show, Eq, Generic, FromJSON)
+
+data DriveFileMetadata = DriveFileMetadata {
+    fileId :: Text
+} deriving (Show, Eq)
+
+instance FromJSON DriveFileMetadata where
+    parseJSON (Object v) = DriveFileMetadata <$> v .: "id"
+    parseJSON invalid = empty -- typeMismatch "DriveFileMetadata" invalid
 
 data Degree = L | M | H deriving (Eq, Ord, Show)
 
@@ -497,16 +522,23 @@ queryRest query acc is count = do
     is' <- issues <$> query count
     queryRest query (acc ++ is) is' (count + length is')
 
+uploadCsv :: (MonadHTTP m) => AccessToken -> LBS.ByteString -> m DriveFileMetadata
+uploadCsv tkn content = do
+    let opts = defaults & auth ?~ (Wreq.oauth2Bearer $ accessToken tkn)
+                        & header "Content-Type" .~ ["text/csv"]
+                        & param "uploadType" .~ ["media"]
+    response <- postWith opts "https://www.googleapis.com/upload/drive/v3/files" content
+    pure $ response ^. responseBody
 
-jiraApp :: (MonadInput m, Log m, MonadHTTPGet m, MonadWriteFS m, MonadReadFS m, MonadOAuth m, MonadCrypto m, MonadError SomeException m) =>
+jiraApp :: (MonadInput m, Log m, MonadHTTPGet m, MonadHTTP m, MonadWriteFS m, MonadReadFS m, MonadOAuth m, MonadCrypto m, MonadError SomeException m) =>
             DomainName -> m ()
 jiraApp domain = do
     mgr <- newTls tlsManagerSettings
     Credentials auth tkn <- getCredentials mgr oauth
     let queryChunk start = query auth domain (SearchQuery (JQL jqlQuery) start)
     is <- queryAll queryChunk
-    writeFile "jira.csv" $ encodeDefaultOrderedByName $ map (jiraToRecord domain) is
-    logInfo "jira.csv created"
+    fileMetadata <- uploadCsv tkn $ encodeDefaultOrderedByName $ map (jiraToRecord domain) is
+    logInfo $ "created https://drive.google.com/file/d/" <> fileId fileMetadata
 
 oauth = OAuth2 { oauthClientId = "804038769221-786vn5l5m772h21masc5p4nm3gl995as.apps.googleusercontent.com"
                , oauthClientSecret = "0JuYNS6p7ibK8jA38_rJBkWO"
