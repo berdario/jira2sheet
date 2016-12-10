@@ -9,7 +9,6 @@
 module Lib
     (
         jiraApp
-      , DomainName(..)
       , MonadHTTPGet
       , MonadWriteFS
       , MonadReadFS
@@ -27,6 +26,7 @@ module Lib
       , liftCrypto
       , chachaEncrypt
       , chachaDecrypt
+      , DomainName(..)
       , JQL(..)
       , SearchQuery(..)
       , JiraStatus(..)
@@ -82,6 +82,7 @@ import           GHC.Generics                 (Generic)
 import           Network.HostName             (getHostName)
 import           Network.HTTP.Conduit         (Manager, ManagerSettings,
                                                newManager, tlsManagerSettings)
+import           Network.HTTP.Types.URI       (urlEncode)
 import           Network.OAuth.OAuth2         (AccessToken (..), OAuth2 (..),
                                                QueryParams, appendQueryParam,
                                                authorizationUrl,
@@ -472,11 +473,11 @@ getCredentials mgr oauth = do
             -- Credentials jCred <$> either (const $ authorizeAndSave' jCred) pure tokenResponse
 
 
-jqlQuery = "project %3D RATM AND issueType not in (Epic%2C Sub-task) AND status not in (Done%2C Resolved%2C Backlog%2C \"Selected for Development\")"
--- jqlQuery = "project %3D DEV AND \"Assigned Team\" %3D \"Dire Straits\" AND issueType not in (Epic%2C Sub-task) AND status not in (Done%2C Resolved%2C Backlog%2C \"Selected for Development\")"
-
 newtype DomainName = DomainName String
-newtype JQL = JQL String
+data JQL = JQL String (Maybe String)
+
+prepareJQL (JQL projectName mTeamName) = encode $ maybe "" (\name -> "\"Assigned Team\" = \"" <> name <> "\" AND ") mTeamName <>
+        "project = \"" <> projectName <> "\" AND issueType not in (Epic, Sub-task) AND status not in (Done, Resolved, Backlog, \"Selected for Development\")"
 
 data SearchQuery = SearchQuery
     JQL
@@ -491,13 +492,13 @@ jiraBrowse (DomainName domain) jiraKey =
         , uriQuery="", uriFragment=""}
 
 jiraURI :: DomainName -> SearchQuery -> URI
-jiraURI (DomainName domain) (SearchQuery (JQL jql) start) =
+jiraURI (DomainName domain) (SearchQuery jql start) =
     URI { uriScheme="https:"
         , uriAuthority=Just URIAuth { uriUserInfo=""
                                     , uriRegName=domain
                                     , uriPort=""}
         , uriPath="/rest/api/latest/search"
-        , uriQuery="?jql=" <> jql <> "&startAt=" <> show start
+        , uriQuery="?jql=" <> decode (urlEncode False (prepareJQL jql)) <> "&startAt=" <> show start
         , uriFragment=""}
 
 query :: (MonadHTTPGet m) => Auth -> DomainName -> SearchQuery -> m JiraResponse
@@ -531,11 +532,11 @@ uploadCsv tkn content = do
     pure $ response ^. responseBody
 
 jiraApp :: (MonadInput m, Log m, MonadHTTPGet m, MonadHTTP m, MonadWriteFS m, MonadReadFS m, MonadOAuth m, MonadCrypto m, MonadError SomeException m) =>
-            DomainName -> m ()
-jiraApp domain = do
+            (DomainName, JQL) -> m ()
+jiraApp (domain, jql) = do
     mgr <- newTls tlsManagerSettings
     Credentials auth tkn <- getCredentials mgr oauth
-    let queryChunk start = query auth domain (SearchQuery (JQL jqlQuery) start)
+    let queryChunk start = query auth domain (SearchQuery jql start)
     is <- queryAll queryChunk
     fileMetadata <- uploadCsv tkn $ encodeDefaultOrderedByName $ map (jiraToRecord domain) is
     logInfo $ "created https://drive.google.com/file/d/" <> fileId fileMetadata

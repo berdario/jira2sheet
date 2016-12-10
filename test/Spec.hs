@@ -140,7 +140,7 @@ main = hspec $ do
                 _getWith = \_ query -> log (startParam query) >>
                                        response query
             }
-            let query' start = query (basicAuth "" "") (DomainName "") (SearchQuery (JQL "") start)
+            let query' start = query (basicAuth "" "") (DomainName "") (SearchQuery (JQL "" Nothing) start)
             let calls = logTestFixture (queryAll query') queryInst
             catMaybes calls `shouldBe` [0, 4, 8, 10]
     describe "crypto" $
