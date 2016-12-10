@@ -39,6 +39,7 @@ library
                      , hostname
                      , cryptonite
                      , memory
+                     , directory
   default-language:    Haskell2010
 
 executable jira2sheet

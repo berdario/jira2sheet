@@ -16,10 +16,17 @@ module Lib
       , Log
       , MonadInput
       , MonadOAuth
-      , MonadCrypto
+      , MonadCrypto(..)
+      , MonadError
       , query
       , queryAll
       , getCredentials
+      , encryptCredentials'
+      , crypt
+      , stretchKey
+      , liftCrypto
+      , chachaEncrypt
+      , chachaDecrypt
       , JQL(..)
       , SearchQuery(..)
       , JiraStatus(..)
@@ -28,14 +35,15 @@ module Lib
       , JiraResponse(..)
       , Credentials(..)
       , SavedCredentials(..)
+      , EncryptedData(..)
     ) where
 
-import           Prelude                      hiding (take, writeFile)
+import           Prelude                      hiding (readFile, take, writeFile)
 
-import           Control.Exception            (Exception, SomeException (..))
+import           Control.Exception            (Exception (..),
+                                               SomeException (..))
 import           Control.Lens                 ((&), (?~), (^.))
-import           Control.Monad                (MonadPlus, join, mzero, unless,
-                                               (<=<))
+import           Control.Monad                (MonadPlus, join, unless, (<=<))
 import           Control.Monad.Catch          (MonadThrow)
 import           Control.Monad.Except         (ExceptT (..), MonadError (..),
                                                mapExceptT, runExceptT,
@@ -48,7 +56,8 @@ import           Control.Monad.Trans.Class    (MonadTrans, lift)
 import           Control.Monad.Trans.Maybe    (MaybeT (..), mapMaybeT,
                                                maybeToExceptT)
 import           Control.Monad.Trans.Reader   (ReaderT (..))
-import           Crypto.Argon2                (defaultHashOptions, hash)
+import           Crypto.Argon2                (HashOptions (..),
+                                               defaultHashOptions, hash)
 import qualified Crypto.Cipher.ChaChaPoly1305 as ChaCha
 import           Crypto.Error                 (CryptoError, eitherCryptoError)
 import qualified Crypto.Random.Entropy        as Entropy
@@ -85,12 +94,18 @@ import           System.Console.Haskeline     (InputT, MonadException (..),
                                                RunIO (..), defaultSettings,
                                                runInputT)
 import qualified System.Console.Haskeline     as Haskeline
+import qualified System.Directory             as Directory
+import           Text.Read                    (readMaybe)
 import           UnexceptionalIO              (UIO, fromIO, unsafeFromIO)
 import           Web.Browser                  (openBrowser)
 
+chachaEncrypt = ChaCha.encrypt :: ByteString -> ChaCha.State -> (ByteString, ChaCha.State)
+chachaDecrypt = ChaCha.decrypt :: ByteString -> ChaCha.State -> (ByteString, ChaCha.State)
+
 class (Monad m) => Log m where
      logDebug :: Text -> m ()
-     logInfo :: Text -> m()
+     logInfo :: Text -> m ()
+     logError :: Text -> m ()
 
 data Error = Error String deriving (Show, Eq)
 deriving instance Exception Error
@@ -102,11 +117,15 @@ class (Monad m) => MonadWriteFS m where
     writeFile :: FilePath -> LBS.ByteString -> m ()
 
 class (Monad m) => MonadReadFS m where
-    decryptSavedCredentials :: FilePath -> ByteString -> MaybeT m SavedCredentials
+    readFile :: FilePath -> m LBS.ByteString
+    doesFileExist :: FilePath -> m Bool
 
 class (Monad m) => MonadInput m where
     getInputLine :: String -> m String
     getPassword :: Maybe Char -> String -> m String
+
+getPassword' :: (MonadInput m) => String -> m String
+getPassword' = getPassword (Just '*')
 
 class (Monad m) => MonadOAuth m where
     newTls :: ManagerSettings -> m Manager
@@ -129,10 +148,12 @@ instance (MonadCrypto m) => MonadCrypto (LoggingT message m) where
 instance (Monad m) => Log (LoggingT (WithSeverity Text) m) where
     logDebug = Log.logDebug
     logInfo = Log.logInfo
+    logError = Log.logError
 
 instance (Log m) => Log (ExceptT e m) where
     logDebug = lift . logDebug
     logInfo = lift . logInfo
+    logError = lift . logError
 
 instance MonadHTTPGet UIO where
     getWith options = unsafeFromIO . (asJSON <=< Wreq.getWith options)
@@ -141,7 +162,8 @@ instance MonadWriteFS UIO where
     writeFile path = unsafeFromIO . LBS.writeFile path
 
 instance MonadReadFS UIO where
-    decryptSavedCredentials fp key = mzero -- TODO
+    readFile = unsafeFromIO . LBS.readFile
+    doesFileExist = unsafeFromIO . Directory.doesFileExist
 
 runInput :: InputT IO (Maybe a) -> MaybeT UIO a -- TODO add back MonadException, convert to MonadError?
 runInput = MaybeT . unsafeFromIO . runInputT defaultSettings
@@ -155,6 +177,9 @@ encode = Text.encodeUtf8 . Text.pack
 
 decode :: ByteString -> String
 decode = Text.unpack . Text.decodeUtf8
+
+lazyEncode :: String -> LBS.ByteString
+lazyEncode = LazyText.encodeUtf8 . LazyText.pack
 
 lazyDecode :: LBS.ByteString -> String
 lazyDecode = LazyText.unpack . LazyText.decodeUtf8
@@ -188,10 +213,12 @@ instance (MonadWriteFS m) => MonadWriteFS (ExceptT e m) where
     writeFile path = lift . writeFile path
 
 instance (MonadReadFS m) => MonadReadFS (LoggingT message m) where
-    decryptSavedCredentials fp = mapMaybeT lift . decryptSavedCredentials fp
+    readFile = lift . readFile
+    doesFileExist = lift . doesFileExist
 
 instance (MonadReadFS m) => MonadReadFS (ExceptT e m) where
-    decryptSavedCredentials fp = mapMaybeT lift . decryptSavedCredentials fp
+    readFile = lift . readFile
+    doesFileExist = lift . doesFileExist
 
 instance (MonadOAuth m) => MonadOAuth (LoggingT message m) where
     newTls = lift . newTls
@@ -210,7 +237,8 @@ instance (MonadWriteFS m) => MonadWriteFS (MaybeT m) where
     writeFile path = lift . writeFile path
 
 instance (MonadReadFS m) => MonadReadFS (MaybeT m) where
-    decryptSavedCredentials fp = mapMaybeT lift . decryptSavedCredentials fp
+    readFile = lift . readFile
+    doesFileExist = lift . doesFileExist
 
 instance (MonadInput m) => MonadInput (LoggingT message m) where
     getInputLine = lift . getInputLine
@@ -225,6 +253,8 @@ type JiraUsername = String
 type JiraPassword = String
 data SavedCredentials = SavedCredentials JiraUsername JiraPassword RefreshToken deriving (Show, Read)
 data Credentials = Credentials Auth AccessToken
+
+data EncryptedData = EncryptedData ByteString ByteString ByteString deriving (Show, Read)
 
 data JiraStatus = JiraStatus {
     name :: Text
@@ -316,14 +346,16 @@ basicAuth user password = Wreq.basicAuth (encode user) (encode password)
 getJiraCredentials :: (MonadInput m) => m (JiraUsername, JiraPassword)
 getJiraCredentials = do
     user <- getInputLine "Jira username>"
-    password <- getPassword (Just '*') "Jira password>"
+    password <- getPassword' "Jira password>"
     return (user, password)
+
+argonOptions = defaultHashOptions{hashIterations=10}
 
 stretchKey :: (MonadCrypto m, MonadError SomeException m) => ByteString -> m B.ScrubbedBytes
 stretchKey pass = do
     salt <- getSalt
     let padding = BS.take (8 - BS.length salt) "\0\0\0\0\0\0\0\0"
-    liftCrypto $ toScrubbed $ BS.take 32 $ hash defaultHashOptions pass (salt <> padding)
+    liftCrypto $ toScrubbed $ BS.take 32 $ hash argonOptions pass (salt <> padding)
 
 toScrubbed :: ByteString -> Either Error B.ScrubbedBytes
 toScrubbed bs = mapLeft Error $ fill l $ putBytes bs
@@ -333,30 +365,47 @@ toScrubbed bs = mapLeft Error $ fill l $ putBytes bs
 liftCrypto :: (Exception e, MonadCrypto m, MonadError SomeException m) => Either e a -> m a
 liftCrypto = either (throwError . SomeException) pure
 
-encryptCredentials :: (MonadCrypto m, MonadError SomeException m) => ByteString -> SavedCredentials -> m ByteString
+encryptCredentials :: (MonadCrypto m, MonadError SomeException m) => String -> SavedCredentials -> m EncryptedData
 encryptCredentials password creds = do
     nonce <- getEntropy 12
-    key <- stretchKey password
-    liftCrypto $ encrypt nonce key $ encode $ show creds
+    key <- stretchKey $ encode password
+    liftCrypto $ crypt ChaCha.encrypt nonce key $ encode $ show creds
 
-encrypt
-    :: ByteString -- nonce (12 random bytes)
+encryptCredentials' :: (MonadCrypto m, MonadError SomeException m) => String -> SavedCredentials -> m LBS.ByteString
+encryptCredentials' password creds = lazyEncode . show <$> encryptCredentials password creds
+
+throwMessage :: (MonadError SomeException m) => String -> m a
+throwMessage = throwError . SomeException . Error
+
+decryptCredentials :: (MonadCrypto m, MonadError SomeException m, MonadInput m) => String -> EncryptedData -> m SavedCredentials
+decryptCredentials password ed@(EncryptedData nonce cyphertext auth) = do
+    key <- stretchKey $ encode password
+    (EncryptedData _ plaintext auth') <- liftCrypto $ crypt ChaCha.decrypt nonce key cyphertext
+    if auth /= auth' then do
+        password' <- getPassword' "Incorrect password, please insert again>"
+        decryptCredentials password' ed
+    else maybe (throwMessage "I'm sorry, it looks like your saved credentials are corrupted")
+                pure $ readMaybe $ decode plaintext
+
+crypt
+    :: (ByteString -> ChaCha.State -> (ByteString, ChaCha.State)) -- en/decrypter
+    -> ByteString -- nonce (12 random bytes)
     -> B.ScrubbedBytes -- symmetric key
-    -> ByteString -- input plaintext to be encrypted
-    -> Either CryptoError ByteString -- ciphertext with a 128-bit tag attached
-encrypt nonce key plaintext = eitherCryptoError $ do
+    -> ByteString -- input to be encrypted/decrypted
+    -> Either CryptoError EncryptedData
+crypt encrypter nonce key sourcetext = eitherCryptoError $ do
     st1 <- ChaCha.nonce12 nonce >>= ChaCha.initialize key
     let
         st2 = ChaCha.finalizeAAD $ ChaCha.appendAAD BS.empty st1
-        (out, st3) = ChaCha.encrypt plaintext st2
+        (out, st3) = encrypter sourcetext st2
         auth = ChaCha.finalize st3
-    return $ out `B.append` B.convert auth
+    return $ EncryptedData nonce out $ B.convert auth
 
 saveCredentials :: (MonadWriteFS m, MonadInput m, MonadCrypto m, MonadError SomeException m) => SavedCredentials -> m ()
 saveCredentials creds = do
-    pass <- getPassword (Just '*') "Please insert an encryption password for your credentials>"
-    encryptedCreds <- encryptCredentials (encode pass) creds
-    writeFile "credentials.enc" $ LBS.fromStrict encryptedCreds
+    pass <- getPassword' "Please insert an encryption password for your credentials>"
+    encryptedCreds <- encryptCredentials' pass creds
+    writeFile "credentials.enc" encryptedCreds
 
 authorizeAndSave :: (MonadOAuth m, MonadWriteFS m, MonadInput m, MonadCrypto m, MonadError SomeException m) => Manager -> OAuth2 -> (RefreshToken -> SavedCredentials) -> m AccessToken
 authorizeAndSave mgr oauth builder = do
@@ -364,15 +413,35 @@ authorizeAndSave mgr oauth builder = do
     traverse (saveCredentials . builder) $ refreshToken googleRefresh
     pure googleRefresh
 
-getCredentials :: (MonadInput m, MonadReadFS m, MonadOAuth m, MonadWriteFS m, MonadCrypto m, MonadError SomeException m) => Manager -> OAuth2 -> m Credentials
+maybeDecrypt :: (MonadInput m, MonadReadFS m, MonadCrypto m, MonadError SomeException m) => FilePath -> String -> m SavedCredentials
+maybeDecrypt filepath password = do
+    maybeEncryptedData <- readMaybe . lazyDecode <$> readFile filepath
+    case maybeEncryptedData of
+        (Just encryptedData) -> decryptCredentials password encryptedData
+        Nothing -> throwMessage "It looks like your encrypted credentials are corrupted"
+
+
+decryptSavedCredentials :: (MonadInput m, MonadReadFS m, MonadCrypto m, MonadError SomeException m, Log m) => FilePath -> m (Maybe SavedCredentials)
+decryptSavedCredentials filepath = do
+    fileExists <- doesFileExist filepath
+    if fileExists then do
+        password <- getPassword' "Please insert your credentials decryption password>"
+        catchError (Just <$> maybeDecrypt filepath password) $ \e -> do
+                logError $ Text.pack $ displayException e
+                pure Nothing
+    else pure Nothing
+
+
+getCredentials :: (MonadInput m, MonadReadFS m, MonadOAuth m, MonadWriteFS m, MonadCrypto m, MonadError SomeException m, Log m) => Manager -> OAuth2 -> m Credentials
 getCredentials mgr oauth = do
-    credentials <- runMaybeT $ decryptSavedCredentials undefined undefined
+    credentials <- decryptSavedCredentials "credentials.enc" -- TODO `mplus` pure Nothing
     let authorizeAndSave' = authorizeAndSave mgr oauth
     case credentials of
         Nothing -> do
             (user, pass) <- getJiraCredentials
             Credentials (basicAuth user pass) <$> authorizeAndSave' (SavedCredentials user pass)
-        (Just (SavedCredentials user pass tkn)) ->
+        (Just (SavedCredentials user pass tkn)) -> do
+            logInfo "credentials decrypted"
             Credentials (basicAuth user pass) <$> fetchRefreshToken mgr oauth tkn
             -- tokenResponse <- runExceptT $ fetchRefreshToken mgr oauth tkn
             -- Credentials jCred <$> either (const $ authorizeAndSave' jCred) pure tokenResponse
