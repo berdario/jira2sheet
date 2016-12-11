@@ -35,7 +35,7 @@ library
                      , either
                      , unexceptionalio
                      , open-browser
-                     , argon2
+                     , scrypt
                      , hostname
                      , cryptonite
                      , memory

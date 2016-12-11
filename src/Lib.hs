@@ -57,11 +57,12 @@ import           Control.Monad.Trans.Class    (MonadTrans, lift)
 import           Control.Monad.Trans.Maybe    (MaybeT (..), mapMaybeT,
                                                maybeToExceptT)
 import           Control.Monad.Trans.Reader   (ReaderT (..))
-import           Crypto.Argon2                (HashOptions (..),
-                                               defaultHashOptions, hash)
 import qualified Crypto.Cipher.ChaChaPoly1305 as ChaCha
 import           Crypto.Error                 (CryptoError, eitherCryptoError)
 import qualified Crypto.Random.Entropy        as Entropy
+import           Crypto.Scrypt                (Pass (..), PassHash (..),
+                                               Salt (Salt), scrypt,
+                                               scryptParamsLen)
 import           Data.Aeson                   (FromJSON (..), Value (..), (.:))
 import qualified Data.ByteArray               as B
 import           Data.ByteArray.Pack          (fill, putBytes)
@@ -72,6 +73,7 @@ import           Data.Csv                     (DefaultOrdered,
                                                ToField (toField), ToNamedRecord,
                                                encodeDefaultOrderedByName)
 import           Data.Either.Combinators      (mapLeft)
+import           Data.Maybe                   (fromJust)
 import           Data.Monoid                  ((<>))
 import           Data.Text                    (Text)
 import qualified Data.Text                    as Text
@@ -375,13 +377,12 @@ getJiraCredentials = do
     password <- getPassword' "Jira password>"
     return (user, password)
 
-argonOptions = defaultHashOptions{hashIterations=10}
+scryptParams = fromJust $ scryptParamsLen 19 8 1 32
 
 stretchKey :: (MonadCrypto m, MonadError SomeException m) => ByteString -> m B.ScrubbedBytes
 stretchKey pass = do
     salt <- getSalt
-    let padding = BS.take (8 - BS.length salt) "\0\0\0\0\0\0\0\0"
-    liftCrypto $ toScrubbed $ BS.take 32 $ hash argonOptions pass (salt <> padding)
+    liftCrypto $ toScrubbed $ getHash $ scrypt scryptParams (Salt salt) (Pass pass)
 
 toScrubbed :: ByteString -> Either Error B.ScrubbedBytes
 toScrubbed bs = mapLeft Error $ fill l $ putBytes bs
