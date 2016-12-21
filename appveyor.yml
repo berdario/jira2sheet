@@ -4,9 +4,8 @@ platform:
 - x64
 
 before_build:
-- curl -ostack.tar.gz -L https://www.stackage.org/stack/windows-x86_64
-- 7z x stack.tar.gz -so | 7z x -si -ttar
-- ps: cp stack-*/stack.exe .
+- curl -ostack.zip -L --insecure http://www.stackage.org/stack/windows-x86_64
+- 7z x stack.zip stack.exe
 
 skip_tags: true
 
