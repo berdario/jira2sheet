@@ -7,8 +7,6 @@ before_build:
 - curl -ostack.zip -L --insecure http://www.stackage.org/stack/windows-x86_64
 - 7z x stack.zip stack.exe
 
-skip_tags: true
-
 build_script:
 - stack setup --no-terminal > nul
 - stack build --only-snapshot --no-terminal
@@ -26,4 +24,4 @@ deploy:
       secure: 6Oc+Fqo5z24D/XvNXI5G9kKXQczkmgcqLUULwo7maviGXWcfOQIkinQJSulnIq+E
     artifact: jira2sheet.exe
     on:
-      branch: master
+      appveyor_repo_tag: true
