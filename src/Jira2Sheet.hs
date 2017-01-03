@@ -2,7 +2,7 @@
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE OverloadedStrings     #-}
 
-module Lib where
+module Jira2Sheet where
 
 import           Control.Exception       (SomeException)
 import           Control.Monad.Except    (MonadError)
@@ -23,9 +23,9 @@ import           Jira2Sheet.Types.Input  (MonadInput)
 import           Jira2Sheet.Types.Log    (Log (..))
 
 
-jiraApp :: (MonadInput m, Log m, MonadHTTPGet m, MonadHTTP m, MonadWriteFS m, MonadReadFS m, MonadOAuth m, MonadCrypto m, MonadError SomeException m) =>
+jira2sheet :: (MonadInput m, Log m, MonadHTTPGet m, MonadHTTP m, MonadWriteFS m, MonadReadFS m, MonadOAuth m, MonadCrypto m, MonadError SomeException m) =>
             (DomainName, JQL) -> m ()
-jiraApp (domain, jql) = do
+jira2sheet (domain, jql) = do
     mgr <- newTls tlsManagerSettings
     Credentials auth tkn <- getCredentials mgr oauth
     issues <- jiraQuery auth domain jql

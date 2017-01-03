@@ -19,9 +19,9 @@ import           Options.Applicative        (Parser, execParser, fullDesc, help,
 import           UnexceptionalIO            (UIO, runEitherIO, unsafeFromIO)
 
 
+import           Jira2Sheet
 import           Jira2Sheet.Common          (DomainName (..))
 import           Jira2Sheet.Jira            (JQL (..))
-import           Lib
 
 
 maxLogLevel :: Severity
@@ -60,4 +60,4 @@ runner = runEitherIO . fmap sequence . runMaybeT . runExceptT . flip runLoggingT
 main :: IO ()
 main = do
     args <- execParser (info parser fullDesc)
-    void $ runner $ jiraApp args
+    void $ runner $ jira2sheet args
