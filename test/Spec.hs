@@ -13,6 +13,7 @@ import           Control.Applicative          (Alternative (..))
 import           Control.Exception            (Exception (..), SomeException)
 import           Control.Monad                (MonadPlus (..), void)
 import           Control.Monad.Catch          (MonadThrow)
+import           Control.Monad.Except         (MonadError (..))
 import           Control.Monad.Log            (MonadLog)
 import           Control.Monad.State.Class    (MonadState, gets, modify)
 import           Control.Monad.TestFixture
@@ -37,7 +38,22 @@ import           Test.Hspec
 import           Text.Read                    (readMaybe)
 import           Unsafe.Coerce                (unsafeCoerce)
 
-import           Lib
+import           Jira2Sheet.Auth              (getCredentials)
+import           Jira2Sheet.Common            (DomainName (..),
+                                               EncryptedData (..),
+                                               SavedCredentials (..))
+import           Jira2Sheet.Crypto            (chachaDecrypt, chachaEncrypt,
+                                               crypt, encryptCredentials',
+                                               liftCrypto, stretchKey)
+import           Jira2Sheet.Jira              (JQL (..), JiraFields (..),
+                                               JiraIssue (..),
+                                               JiraResponse (..),
+                                               JiraStatus (..), jiraQuery)
+import           Jira2Sheet.Types.Crypto
+import           Jira2Sheet.Types.Files
+import           Jira2Sheet.Types.HTTP
+import           Jira2Sheet.Types.Input
+import           Jira2Sheet.Types.Log
 
 mkFixture "FixtureInst" [ts|
       MonadHTTPGet
@@ -60,7 +76,7 @@ dummyIssue n =
             status=JiraStatus{name="In Progress"}
           , summary="issue name"
           , customfield_10007=Nothing}
-      , key="DEV-" <> (Text.pack $ show n)}
+      , key="DEV-" <> Text.pack (show n)}
 
 dummyIssues :: [JiraIssue]
 dummyIssues = map dummyIssue [1..10]
@@ -140,8 +156,7 @@ main = hspec $ do
                 _getWith = \_ query -> log (startParam query) >>
                                        response query
             }
-            let query' start = query (basicAuth "" "") (DomainName "") (SearchQuery (JQL "" Nothing) start)
-            let calls = logTestFixture (queryAll query') queryInst
+                calls = logTestFixture (jiraQuery (basicAuth "" "") (DomainName "") (JQL "" Nothing)) queryInst
             catMaybes calls `shouldBe` [0, 4, 8, 10]
     describe "crypto" $
         it "Decryption round trips what has been encrypted" $ do
@@ -149,7 +164,7 @@ main = hspec $ do
                 _getEntropy = const $ pure fakeNonce
               , _getSalt = pure "salt"
             }
-            let (Right (plaintext, plain', auth, auth')) = unTestFixtureT testEncryption encryptionInst
+                (Right (plaintext, plain', auth, auth')) = unTestFixtureT testEncryption encryptionInst
             plaintext `shouldBe` plain'
             auth `shouldBe` auth'
     describe "getCredentials" $
@@ -165,7 +180,7 @@ main = hspec $ do
               , _getEntropy = const $ pure fakeNonce
               , _getSalt = pure "salt"
             }
-            let getCredentials' = getCredentials undefined undefined
-            let result = execTestFixtureT (getCredentials' >> getCredentials') credentialsInst []
+                getCredentials' = getCredentials undefined undefined
+                result = execTestFixtureT (getCredentials' >> getCredentials') credentialsInst []
             result `shouldHaveCalled` [Authorize, Write "credentials.enc", Refresh]
 

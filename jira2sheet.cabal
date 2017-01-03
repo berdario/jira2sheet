@@ -16,6 +16,17 @@ cabal-version:       >=1.10
 library
   hs-source-dirs:      src
   exposed-modules:     Lib
+                     , Jira2Sheet.Csv
+                     , Jira2Sheet.Crypto
+                     , Jira2Sheet.Auth
+                     , Jira2Sheet.Common
+                     , Jira2Sheet.GoogleDrive
+                     , Jira2Sheet.Jira
+                     , Jira2Sheet.Types.Crypto
+                     , Jira2Sheet.Types.Files
+                     , Jira2Sheet.Types.HTTP
+                     , Jira2Sheet.Types.Input
+                     , Jira2Sheet.Types.Log
   build-depends:       base >= 4.7 && < 5
                      , wreq
                      , aeson

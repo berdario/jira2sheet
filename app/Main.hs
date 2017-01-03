@@ -19,6 +19,8 @@ import           Options.Applicative        (Parser, execParser, fullDesc, help,
 import           UnexceptionalIO            (UIO, runEitherIO, unsafeFromIO)
 
 
+import           Jira2Sheet.Common          (DomainName (..))
+import           Jira2Sheet.Jira            (JQL (..))
 import           Lib
 
 
