@@ -4,8 +4,11 @@ platform:
 - x64
 
 before_build:
-- curl -ostack.zip -L --insecure http://www.stackage.org/stack/windows-x86_64
+- curl -ostack.zip -L https://www.stackage.org/stack/windows-x86_64
 - 7z x stack.zip stack.exe
+
+cache:
+- '%APPDATA%\stack'
 
 build_script:
 - stack setup --no-terminal > nul
