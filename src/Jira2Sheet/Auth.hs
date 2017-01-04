@@ -27,7 +27,7 @@ import           Jira2Sheet.Types.Log    (Log (..))
 
 data Credentials = Credentials Auth AccessToken
 
-basicAuth :: String -> String -> Auth
+basicAuth :: JiraUsername -> JiraPassword -> Auth
 basicAuth user password = Wreq.basicAuth (encode user) (encode password)
     where encode = Text.encodeUtf8 . Text.pack
 

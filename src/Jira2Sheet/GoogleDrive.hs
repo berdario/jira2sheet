@@ -5,6 +5,7 @@ module Jira2Sheet.GoogleDrive where
 import           Control.Applicative   (empty)
 import           Control.Lens          ((&), (.~), (?~), (^.))
 import           Data.Aeson            (FromJSON (..), Value (..), (.:))
+import           Data.Aeson.Types      (typeMismatch)
 import qualified Data.ByteString.Lazy  as LBS
 import           Data.Text             (Text)
 import           Network.OAuth.OAuth2  (AccessToken (..), OAuth2 (..))
@@ -20,7 +21,7 @@ data DriveFileMetadata = DriveFileMetadata {
 
 instance FromJSON DriveFileMetadata where
     parseJSON (Object v) = DriveFileMetadata <$> v .: "id"
-    parseJSON invalid = empty -- typeMismatch "DriveFileMetadata" invalid
+    parseJSON invalid    = typeMismatch "DriveFileMetadata" invalid
 
 
 oauth = OAuth2 { oauthClientId = "804038769221-786vn5l5m772h21masc5p4nm3gl995as.apps.googleusercontent.com"

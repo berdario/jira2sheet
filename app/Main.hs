@@ -3,14 +3,13 @@
 module Main where
 
 import           Control.Exception          (SomeException)
-import           Control.Monad              (join, void)
+import           Control.Monad              (void)
 import           Control.Monad.Log          (LoggingT, Severity (Informational),
                                              WithSeverity, discardSeverity,
                                              msgSeverity, runLoggingT)
 import           Control.Monad.Trans.Class  (MonadTrans, lift)
 import           Control.Monad.Trans.Except (ExceptT (..), runExceptT)
 import           Control.Monad.Trans.Maybe  (MaybeT (..), runMaybeT)
-import           Data.ByteString.Lazy       (ByteString)
 import           Data.Text                  (Text)
 import qualified Data.Text.IO               as Text
 import           Options.Applicative        (Parser, execParser, fullDesc, help,
