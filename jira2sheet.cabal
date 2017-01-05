@@ -72,8 +72,10 @@ test-suite jira2sheet-test
   type:                exitcode-stdio-1.0
   hs-source-dirs:      test
   main-is:             Spec.hs
-  ghc-options:         -threaded -rtsopts -fprof-auto -fprof-auto-calls "-with-rtsopts=-N -K1K -xc"
-  -- it seems that -fprof-auto* is not picked up when building the suite with `stack test`
+  ghc-options:         -threaded -rtsopts -O0 "-with-rtsopts=-N -K1K -M1G"
+  -- Run with small memory limits and no optimizations to detect possible space leaks
+  -- In case of StackOverflow, we should run again in profile mode, with `stack test --trace`
+  -- since it seems that -fprof-auto* is not picked up when building the suite with `stack test`
   build-depends:       base
                      , jira2sheet
                      , test-fixture
