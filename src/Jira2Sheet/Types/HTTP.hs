@@ -32,7 +32,7 @@ import           Jira2Sheet.Types.Input    (MonadInput (..))
 class (Monad m ) => MonadHTTPGet m where -- TODO add back MonadThrow, change to MonadError
     getWith :: (FromJSON a) => Wreq.Options -> String -> m (Wreq.Response a)
 
-class (Monad m) => MonadHTTP m where
+class (MonadHTTPGet m) => MonadHTTP m where
     postWith :: (Postable a, FromJSON b) => Wreq.Options -> String -> a -> m (Wreq.Response b)
 
 

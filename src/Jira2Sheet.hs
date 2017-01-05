@@ -17,13 +17,12 @@ import           Jira2Sheet.GoogleDrive  (DriveFileMetadata (fileId), oauth,
 import           Jira2Sheet.Jira         (JQL, jiraQuery)
 import           Jira2Sheet.Types.Crypto (MonadCrypto (..))
 import           Jira2Sheet.Types.Files  (MonadReadFS (..), MonadWriteFS (..))
-import           Jira2Sheet.Types.HTTP   (MonadHTTP (..), MonadHTTPGet (..),
-                                          MonadOAuth (..))
+import           Jira2Sheet.Types.HTTP   (MonadHTTP (..), MonadOAuth (..))
 import           Jira2Sheet.Types.Input  (MonadInput)
 import           Jira2Sheet.Types.Log    (Log (..))
 
 
-jira2sheet :: (MonadInput m, Log m, MonadHTTPGet m, MonadHTTP m, MonadWriteFS m, MonadReadFS m, MonadOAuth m, MonadCrypto m, MonadError SomeException m) =>
+jira2sheet :: (MonadInput m, Log m, MonadHTTP m, MonadWriteFS m, MonadReadFS m, MonadOAuth m, MonadCrypto m, MonadError SomeException m) =>
             (DomainName, JQL) -> m ()
 jira2sheet (domain, jql) = do
     mgr <- newTls tlsManagerSettings
